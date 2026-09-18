@@ -1,0 +1,14 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "logviewer",
+  "outputfilename": "logviewer",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "build:tags": "no_duckdb_arrow",
+  "author": {
+    "name": "kostiantyn",
+    "email": "kostiantyn.vysotskyi@synthesishealthinc.com"
+  }
+}

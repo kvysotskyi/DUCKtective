@@ -1,0 +1,499 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  APP_NAME: logviewer
+  APP_PATH: build/bin/logviewer.app
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        platform:
+          - arch: arm64
+            name: Apple Silicon
+          - arch: amd64
+            name: Intel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install frontend dependencies
+        run: npm install
+        working-directory: frontend
+
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_P12_PASSWORD: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -hex 16)"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PW=$KEYCHAIN_PW" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+
+          # Make this keychain the only one searched to avoid picking the wrong identity
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERT_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          # Required for non-interactive codesign on CI
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+
+          security find-identity -v -p codesigning
+
+      - name: Build for ${{ matrix.platform.name }}
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.platform.arch }}
+          CGO_ENABLED: 1
+        run: |
+          set -euo pipefail
+          wails build -platform darwin/${{ matrix.platform.arch }}
+
+      - name: Sign app (Developer ID)
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ env.APP_PATH }}"
+
+          IDENTITY="$(security find-identity -v -p codesigning | awk -F\" '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "${IDENTITY:-}" ]]; then
+            echo "ERROR: Developer ID Application identity not found"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+          echo "Using identity: $IDENTITY"
+
+          xattr -cr "$APP_PATH" || true
+
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" \
+            "$APP_PATH"
+
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+
+      - name: Notarize app (zip submit) + staple
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ env.APP_NAME }}"
+          APP_PATH="${{ env.APP_PATH }}"
+          ZIP_PATH="$RUNNER_TEMP/${APP_NAME}-${{ matrix.platform.arch }}.zip"
+
+          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool submit "$ZIP_PATH" \
+            --key "$KEY_PATH" \
+            --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" \
+            --wait
+
+          xcrun stapler staple "$APP_PATH"
+          spctl -a -vv "$APP_PATH"
+
+      - name: Create DMG (pretty)
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ env.APP_NAME }}"
+          APP_PATH="${{ env.APP_PATH }}"
+          OUT_DIR="$RUNNER_TEMP/dmg-${{ matrix.platform.arch }}"
+          mkdir -p "$OUT_DIR"
+
+          npm i -g create-dmg
+
+          create-dmg \
+            --dmg-title "${APP_NAME}" \
+            "$APP_PATH" \
+            "$OUT_DIR"
+
+          DMG_PATH="$(ls -1 "$OUT_DIR"/*.dmg | head -n 1)"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+          echo "Created DMG: $DMG_PATH"
+
+      - name: Sign DMG
+        run: |
+          set -euo pipefail
+
+          IDENTITY="$(security find-identity -v -p codesigning | awk -F\" '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "${IDENTITY:-}" ]]; then
+            echo "ERROR: Developer ID Application identity not found"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+          echo "Using identity: $IDENTITY"
+
+          codesign --force --timestamp --sign "$IDENTITY" "$DMG_PATH"
+          codesign --verify --verbose=4 "$DMG_PATH"
+
+      - name: Notarize DMG
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --key "$KEY_PATH" \
+            --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" \
+            --wait
+
+          # Verify DMG is properly signed and notarized
+          codesign --verify --deep --strict --verbose=4 "$DMG_PATH"
+
+      - name: Upload App Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: logviewer-macOS-${{ matrix.platform.arch }}-app
+          path: build/bin/*.app
+          retention-days: 30
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: logviewer-macOS-${{ matrix.platform.arch }}-dmg
+          path: ${{ env.DMG_PATH }}
+          retention-days: 30
+
+  universal-macos:
+    needs: build-macos
+    runs-on: macos-latest
+    steps:
+      - name: Download ARM64 app
+        uses: actions/download-artifact@v4
+        with:
+          name: logviewer-macOS-arm64-app
+          path: arm64
+
+      - name: Download AMD64 app
+        uses: actions/download-artifact@v4
+        with:
+          name: logviewer-macOS-amd64-app
+          path: amd64
+
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_P12_PASSWORD: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -hex 16)"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PW=$KEYCHAIN_PW" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERT_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning
+
+      - name: Create Universal App
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ env.APP_NAME }}"
+          APP_BUNDLE="${APP_NAME}.app"
+
+          cp -R "arm64/${APP_BUNDLE}" "${APP_BUNDLE}"
+
+          lipo -create \
+            "arm64/${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" \
+            "amd64/${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" \
+            -output "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+
+          file "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+
+      - name: Sign universal app (Developer ID)
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ env.APP_NAME }}"
+          APP_BUNDLE="${APP_NAME}.app"
+
+          IDENTITY="$(security find-identity -v -p codesigning | awk -F\" '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "${IDENTITY:-}" ]]; then
+            echo "ERROR: Developer ID Application identity not found"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+          echo "Using identity: $IDENTITY"
+
+          xattr -cr "$APP_BUNDLE" || true
+
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" \
+            "$APP_BUNDLE"
+
+          codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
+
+      - name: Notarize universal app (zip submit) + staple
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ env.APP_NAME }}"
+          APP_BUNDLE="${APP_NAME}.app"
+          ZIP_PATH="$RUNNER_TEMP/${APP_NAME}-universal.zip"
+
+          ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool submit "$ZIP_PATH" \
+            --key "$KEY_PATH" \
+            --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" \
+            --wait
+
+          xcrun stapler staple "$APP_BUNDLE"
+          spctl -a -vv "$APP_BUNDLE"
+
+      - name: Create Universal DMG (pretty)
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ env.APP_NAME }}"
+          APP_BUNDLE="${APP_NAME}.app"
+          OUT_DIR="$RUNNER_TEMP/dmg-universal"
+          mkdir -p "$OUT_DIR"
+
+          npm i -g create-dmg
+
+          create-dmg \
+            --dmg-title "${APP_NAME}" \
+            "$APP_BUNDLE" \
+            "$OUT_DIR"
+
+          DMG_PATH="$(ls -1 "$OUT_DIR"/*.dmg | head -n 1)"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+          echo "Created DMG: $DMG_PATH"
+
+      - name: Sign Universal DMG
+        run: |
+          set -euo pipefail
+
+          IDENTITY="$(security find-identity -v -p codesigning | awk -F\" '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "${IDENTITY:-}" ]]; then
+            echo "ERROR: Developer ID Application identity not found"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+          echo "Using identity: $IDENTITY"
+
+          codesign --force --timestamp --sign "$IDENTITY" "$DMG_PATH"
+          codesign --verify --verbose=4 "$DMG_PATH"
+
+      - name: Notarize Universal DMG
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --key "$KEY_PATH" \
+            --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" \
+            --wait
+
+          # Verify DMG is properly signed and notarized
+          codesign --verify --deep --strict --verbose=4 "$DMG_PATH"
+
+      - name: Upload Universal App
+        uses: actions/upload-artifact@v4
+        with:
+          name: logviewer-macOS-universal-app
+          path: "*.app"
+          retention-days: 30
+
+      - name: Upload Universal DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: logviewer-macOS-universal-dmg
+          path: ${{ env.DMG_PATH }}
+          retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install frontend dependencies
+        run: npm install
+        working-directory: frontend
+
+      # windows-latest has no C toolchain by default — go-duckdb's CGO build needs one.
+      - name: Install MinGW
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      - name: Build (unsigned)
+        env:
+          CGO_ENABLED: 1
+        run: wails build -platform windows/amd64
+
+      - name: Zip build
+        run: Compress-Archive -Path build/bin/logviewer.exe -DestinationPath build/bin/logviewer-windows-amd64.zip
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: logviewer-windows-amd64
+          path: build/bin/logviewer-windows-amd64.zip
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, universal-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Extract tag name
+        id: tag
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Rename DMG/zip files uniquely
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.TAG_NAME }}"
+          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" \) | while read -r file; do
+            dir=$(dirname "$file")
+            ext="${file##*.}"
+
+            parent=$(basename "$dir")
+            if [[ "$parent" == *"arm64"* ]]; then
+              arch="arm64"
+            elif [[ "$parent" == *"amd64"* ]]; then
+              arch="amd64"
+            elif [[ "$parent" == *"universal"* ]]; then
+              arch="universal"
+            else
+              arch="unknown"
+            fi
+
+            if [[ "$parent" == *"windows"* ]]; then
+              new="${TAG}-windows-${arch}.${ext}"
+            else
+              new="${TAG}-macOS-${arch}.${ext}"
+            fi
+
+            mv "$file" "$dir/$new"
+            echo "Renamed: $(basename "$file") -> $new"
+          done
+
+          echo "Final release files:"
+          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" \)
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
+          name: Release ${{ steps.tag.outputs.TAG_NAME }}
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
+          draft: true
+          generate_release_notes: true
+          token: ${{ github.token }}

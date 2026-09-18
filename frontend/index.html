@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Log Viewer</title>
+    <link rel="stylesheet" href="./src/style.css"/>
+</head>
+<body>
+<div id="app">
+    <header>
+        <h1>Log Viewer</h1>
+        <div id="auth-banner" class="banner">Checking Google Cloud credentials…</div>
+    </header>
+
+    <section id="bucket-section" class="panel">
+        <h2>1. Bucket</h2>
+        <div class="row">
+            <select id="bucket-select"><option value="">Select a bucket…</option></select>
+            <button id="refresh-buckets-btn">Refresh buckets</button>
+            <span id="bucket-status" class="status"></span>
+        </div>
+    </section>
+
+    <section id="files-section" class="panel" hidden>
+        <h2>2. Find &amp; load files</h2>
+        <div class="row">
+            <input id="prefix-input" type="text" placeholder="key prefix, e.g. logs/gateway-2026-09"/>
+            <button id="find-files-btn">Find files</button>
+            <button id="load-files-btn" disabled>Load selected</button>
+        </div>
+        <table id="files-table">
+            <thead>
+            <tr><th></th><th>Name</th><th>Size</th><th>Last modified</th><th>Loaded</th></tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        <div id="load-summary"></div>
+    </section>
+
+    <section id="search-section" class="panel" hidden>
+        <h2>3. Search</h2>
+        <div class="filters">
+            <label>From <input id="filter-from" type="datetime-local"/></label>
+            <label>To <input id="filter-to" type="datetime-local"/></label>
+            <label>Level <select id="filter-level"><option value="">Any</option></select></label>
+            <label>Message contains <input id="filter-msg" type="text"/></label>
+            <label>Topic contains <input id="filter-topic" type="text"/></label>
+            <label>Accession contains <input id="filter-accession" type="text"/></label>
+            <label>Study UID contains <input id="filter-studyuid" type="text"/></label>
+            <button id="search-btn">Search</button>
+        </div>
+        <div id="search-status" class="status"></div>
+        <table id="results-table">
+            <thead>
+            <tr>
+                <th>Time</th><th>Level</th><th>Message</th><th>Topic</th>
+                <th>Accession</th><th>Study UID</th><th>Source</th>
+            </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </section>
+
+    <section id="retention-section" class="panel" hidden>
+        <h2>4. Retention cleanup</h2>
+        <div class="row">
+            <label>Delete rows older than <input id="retention-cutoff" type="date"/></label>
+            <button id="retention-btn">Delete</button>
+            <span id="retention-status" class="status"></span>
+        </div>
+    </section>
+</div>
+
+<div id="raw-modal" class="modal" hidden>
+    <div class="modal-content">
+        <button id="raw-modal-close" class="modal-close">&times;</button>
+        <pre id="raw-modal-body"></pre>
+    </div>
+</div>
+
+<script src="./src/main.js" type="module"></script>
+</body>
+</html>
