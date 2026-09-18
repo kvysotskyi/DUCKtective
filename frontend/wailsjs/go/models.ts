@@ -107,6 +107,7 @@ export namespace store {
 	    topic: string;
 	    accession: string;
 	    studyUid: string;
+	    text: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Filters(source);
@@ -121,6 +122,7 @@ export namespace store {
 	        this.topic = source["topic"];
 	        this.accession = source["accession"];
 	        this.studyUid = source["studyUid"];
+	        this.text = source["text"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

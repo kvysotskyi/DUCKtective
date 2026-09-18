@@ -19,6 +19,9 @@ type Filters struct {
 	Topic     string     `json:"topic"`
 	Accession string     `json:"accession"`
 	StudyUID  string     `json:"studyUid"`
+	// Text matches anywhere in the original raw JSON line — covers fields that don't have their own
+	// extracted column, since a bucket's lines can carry arbitrary extra keys beyond the fixed schema.
+	Text string `json:"text"`
 }
 
 type LogRow struct {
@@ -70,6 +73,7 @@ func (db *DB) Search(ctx context.Context, bucket string, f Filters) (SearchResul
 	addLike("colon_topic", f.Topic)
 	addLike("accession", f.Accession)
 	addLike("study_uid", f.StudyUID)
+	addLike("raw", f.Text)
 
 	query := `SELECT file_hash, COALESCE(time, colon_time) AS effective_ts, level, msg, colon_topic,
 		accession, study_uid, source_file, source_line FROM "` + table + `"`

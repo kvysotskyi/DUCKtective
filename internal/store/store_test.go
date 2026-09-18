@@ -96,6 +96,14 @@ func TestSearchFiltersAndEffectiveTS(t *testing.T) {
 		t.Fatalf("accession filter mismatch: %+v", res.Rows)
 	}
 
+	textRes, err := db.Search(ctx, "b1", Filters{Text: "gateway"})
+	if err != nil {
+		t.Fatalf("Search text: %v", err)
+	}
+	if len(textRes.Rows) != 1 || textRes.Rows[0].Topic == nil || *textRes.Rows[0].Topic != "gateway" {
+		t.Fatalf("free-text filter over raw mismatch: %+v", textRes.Rows)
+	}
+
 	levels, err := db.DistinctLevels(ctx, "b1")
 	if err != nil {
 		t.Fatalf("DistinctLevels: %v", err)

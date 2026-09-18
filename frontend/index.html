@@ -8,74 +8,71 @@
 </head>
 <body>
 <div id="app">
-    <header>
+    <header class="topbar">
         <h1>Log Viewer</h1>
-        <div id="auth-banner" class="banner">Checking Google Cloud credentials…</div>
+        <select id="bucket-select"><option value="">Select a bucket…</option></select>
+        <button id="refresh-buckets-btn" class="ghost-btn" title="Refresh bucket list">⟳</button>
+        <div id="auth-pill" class="pill">Checking credentials…</div>
     </header>
 
-    <section id="bucket-section" class="panel">
-        <h2>1. Bucket</h2>
-        <div class="row">
-            <select id="bucket-select"><option value="">Select a bucket…</option></select>
-            <button id="refresh-buckets-btn">Refresh buckets</button>
-            <span id="bucket-status" class="status"></span>
-        </div>
-    </section>
+    <div id="bucket-empty-state" class="empty-state">
+        Pick a bucket above to start searching.
+    </div>
 
-    <section id="files-section" class="panel" hidden>
-        <h2>2. Find &amp; load files</h2>
-        <div class="row">
-            <input id="prefix-input" type="text" placeholder="key prefix, e.g. logs/gateway-2026-09"/>
-            <button id="find-files-btn">Find files</button>
-            <button id="load-files-btn" disabled>Load selected</button>
+    <div id="main" hidden>
+        <div class="query-bar">
+            <input id="query-input" type="text"
+                   placeholder="Search anywhere in the log line — any field, not just the ones below…"/>
+            <input id="filter-from" type="datetime-local" title="From"/>
+            <span class="query-bar-sep">→</span>
+            <input id="filter-to" type="datetime-local" title="To"/>
+            <select id="filter-level"><option value="">All levels</option></select>
+            <button id="search-btn" class="primary-btn">Search</button>
         </div>
-        <table id="files-table">
+
+        <details id="advanced-filters">
+            <summary>Advanced filters</summary>
+            <div class="advanced-filters-row">
+                <label>Message contains <input id="filter-msg" type="text"/></label>
+                <label>Topic contains <input id="filter-topic" type="text"/></label>
+                <label>Accession contains <input id="filter-accession" type="text"/></label>
+                <label>Study UID contains <input id="filter-studyuid" type="text"/></label>
+            </div>
+        </details>
+
+        <div id="search-status" class="status-line"></div>
+
+        <table id="results-table" class="log-table">
             <thead>
-            <tr><th></th><th>Name</th><th>Size</th><th>Last modified</th><th>Loaded</th></tr>
+            <tr><th class="col-time">Time</th><th class="col-level">Level</th><th>Message</th><th class="col-source">Source</th></tr>
             </thead>
             <tbody></tbody>
         </table>
-        <div id="load-summary"></div>
-    </section>
 
-    <section id="search-section" class="panel" hidden>
-        <h2>3. Search</h2>
-        <div class="filters">
-            <label>From <input id="filter-from" type="datetime-local"/></label>
-            <label>To <input id="filter-to" type="datetime-local"/></label>
-            <label>Level <select id="filter-level"><option value="">Any</option></select></label>
-            <label>Message contains <input id="filter-msg" type="text"/></label>
-            <label>Topic contains <input id="filter-topic" type="text"/></label>
-            <label>Accession contains <input id="filter-accession" type="text"/></label>
-            <label>Study UID contains <input id="filter-studyuid" type="text"/></label>
-            <button id="search-btn">Search</button>
-        </div>
-        <div id="search-status" class="status"></div>
-        <table id="results-table">
-            <thead>
-            <tr>
-                <th>Time</th><th>Level</th><th>Message</th><th>Topic</th>
-                <th>Accession</th><th>Study UID</th><th>Source</th>
-            </tr>
-            </thead>
-            <tbody></tbody>
-        </table>
-    </section>
+        <details class="side-panel">
+            <summary>Load files from GCS</summary>
+            <div class="row">
+                <input id="prefix-input" type="text" placeholder="key prefix, e.g. logs/gateway-2026-09"/>
+                <button id="find-files-btn">Find files</button>
+                <button id="load-files-btn" disabled>Load selected</button>
+            </div>
+            <table class="files-table">
+                <thead>
+                <tr><th></th><th>Name</th><th>Size</th><th>Last modified</th><th>Loaded</th></tr>
+                </thead>
+                <tbody id="files-tbody"></tbody>
+            </table>
+            <div id="load-summary"></div>
+        </details>
 
-    <section id="retention-section" class="panel" hidden>
-        <h2>4. Retention cleanup</h2>
-        <div class="row">
-            <label>Delete rows older than <input id="retention-cutoff" type="date"/></label>
-            <button id="retention-btn">Delete</button>
-            <span id="retention-status" class="status"></span>
-        </div>
-    </section>
-</div>
-
-<div id="raw-modal" class="modal" hidden>
-    <div class="modal-content">
-        <button id="raw-modal-close" class="modal-close">&times;</button>
-        <pre id="raw-modal-body"></pre>
+        <details class="side-panel">
+            <summary>Retention cleanup</summary>
+            <div class="row">
+                <label>Delete rows older than <input id="retention-cutoff" type="date"/></label>
+                <button id="retention-btn">Delete</button>
+                <span id="retention-status" class="status-line"></span>
+            </div>
+        </details>
     </div>
 </div>
 
