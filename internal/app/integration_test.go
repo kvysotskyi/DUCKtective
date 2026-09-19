@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	testBucket = "bgsa-log-bucket"
+	testBucket = "test"
 	testPrefix = "logs/"
 )
 
@@ -37,12 +37,12 @@ func TestIntegrationRealBucket(t *testing.T) {
 	}
 	found := false
 	for _, p := range projects {
-		if p.ID == "gateway-servicetools" {
+		if p.ID == "test" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("ListProjects() = %v, want gateway-servicetools among them", projects)
+		t.Errorf("ListProjects() = %v, want test among them", projects)
 	}
 
 	client, err := gcs.NewClient(ctx)
@@ -78,7 +78,7 @@ func TestIntegrationRealBucket(t *testing.T) {
 	w, err := db.CreateWiretap(ctx, store.WiretapInput{
 		Name:       "integration-test",
 		SourceType: store.SourceTypeGCS,
-		GCS:        &store.GCSSourceConfig{ProjectID: "gateway-servicetools", Bucket: testBucket},
+		GCS:        &store.GCSSourceConfig{ProjectID: "test", Bucket: testBucket},
 		Prefix:     testPrefix,
 		Fields:     store.DefaultFields(), // time -> ["time", ":time"] fallback, per the real lines below
 	})
@@ -176,7 +176,7 @@ func TestIntegrationLoadPerformance(t *testing.T) {
 	w, err := db.CreateWiretap(ctx, store.WiretapInput{
 		Name:       "perf-test",
 		SourceType: store.SourceTypeGCS,
-		GCS:        &store.GCSSourceConfig{ProjectID: "gateway-servicetools", Bucket: testBucket},
+		GCS:        &store.GCSSourceConfig{ProjectID: "test", Bucket: testBucket},
 		Prefix:     perfPrefix,
 		Fields:     store.DefaultFields(),
 	})
