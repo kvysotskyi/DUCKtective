@@ -415,14 +415,20 @@ jobs:
         working-directory: frontend
 
       # windows-latest has no C toolchain by default — go-duckdb's CGO build needs one.
+      # static: 0 skips the action's "delete libpthread.dll.a/libwinpthread.dll.a" workaround for
+      # forcing static linking — it assumes a file layout that chocolatey's mingw package has since
+      # changed (broke on the v16.1.0 bump) and has no existence check. We get the same static-link
+      # result via CGO_LDFLAGS below instead, which doesn't depend on any particular mingw layout.
       - name: Install MinGW
         uses: egor-tensin/setup-mingw@v2
         with:
           platform: x64
+          static: 0
 
       - name: Build (unsigned)
         env:
           CGO_ENABLED: 1
+          CGO_LDFLAGS: "-static -static-libgcc -static-libstdc++"
         run: wails build -platform windows/amd64
 
       - name: Zip build
