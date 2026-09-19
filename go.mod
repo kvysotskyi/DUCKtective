@@ -1,4 +1,4 @@
-module logviewer
+module ducktective
 
 go 1.26.0
 
@@ -7,6 +7,7 @@ require (
 	github.com/marcboeker/go-duckdb v1.8.5
 	github.com/wailsapp/wails/v2 v2.12.0
 	golang.org/x/oauth2 v0.37.0
+	golang.org/x/sync v0.22.0
 	google.golang.org/api v0.298.0
 )
 
@@ -79,7 +80,6 @@ require (
 	golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
 	golang.org/x/text v0.41.0 // indirect

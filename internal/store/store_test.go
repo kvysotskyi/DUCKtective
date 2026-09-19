@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"ducktective/internal/parse"
 )
 
 func openTestDB(t *testing.T) *DB {
@@ -18,6 +20,20 @@ func openTestDB(t *testing.T) *DB {
 	return db
 }
 
+func createTestWiretap(t *testing.T, db *DB, name string, fields []parse.Field) Wiretap {
+	t.Helper()
+	w, err := db.CreateWiretap(context.Background(), WiretapInput{
+		Name:       name,
+		SourceType: SourceTypeGCS,
+		GCS:        &GCSSourceConfig{ProjectID: "test-project", Bucket: "test-bucket"},
+		Fields:     fields,
+	})
+	if err != nil {
+		t.Fatalf("CreateWiretap(%q): %v", name, err)
+	}
+	return w
+}
+
 const sampleLines = `{"time":"2024-01-01T00:00:00Z","level":"INFO","msg":"first","accession":"A1"}
 not valid json at all
 {":time":"2024-01-02 00:00:00","level":"ERROR","msg":"second",":topic":"gateway","study_uid":"S1"}
@@ -28,8 +44,9 @@ not valid json at all
 func TestLoadFileDedupeAndSkip(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	w := createTestWiretap(t, db, "w1", DefaultFields())
 
-	result, err := db.LoadFile(ctx, "my-bucket", "f.jsonl", strings.NewReader(sampleLines))
+	result, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines))
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
@@ -40,33 +57,35 @@ func TestLoadFileDedupeAndSkip(t *testing.T) {
 		t.Errorf("LinesSkipped = %d, want 1", result.LinesSkipped)
 	}
 
-	// Loading the same file again must not duplicate rows.
-	result2, err := db.LoadFile(ctx, "my-bucket", "f.jsonl", strings.NewReader(sampleLines))
+	// LoadFile itself doesn't dedupe (no per-row uniqueness constraint) — that's the caller's job via
+	// IsFileLoaded, checked here directly rather than through LoadFile.
+	loaded, err := db.IsFileLoaded(ctx, w.ID, "f.jsonl")
 	if err != nil {
-		t.Fatalf("LoadFile (reload): %v", err)
+		t.Fatalf("IsFileLoaded: %v", err)
 	}
-	if result2.RowsInserted != 4 {
-		t.Errorf("reload RowsInserted = %d, want 4 (same file_hash, ON CONFLICT DO NOTHING)", result2.RowsInserted)
+	if !loaded {
+		t.Error("IsFileLoaded = false after LoadFile, want true")
 	}
 
-	res, err := db.Search(ctx, "my-bucket", Filters{})
+	res, err := db.Search(ctx, w, Filters{})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(res.Rows) != 4 {
-		t.Fatalf("Search returned %d rows, want 4 (no duplicates)", len(res.Rows))
+		t.Fatalf("Search returned %d rows, want 4", len(res.Rows))
 	}
 }
 
-func TestSearchFiltersAndEffectiveTS(t *testing.T) {
+func TestSearchFiltersAndTimeFallback(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	w := createTestWiretap(t, db, "w2", DefaultFields())
 
-	if _, err := db.LoadFile(ctx, "b1", "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
 
-	res, err := db.Search(ctx, "b1", Filters{Level: "ERROR"})
+	res, err := db.Search(ctx, w, Filters{Level: "ERROR"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -74,37 +93,37 @@ func TestSearchFiltersAndEffectiveTS(t *testing.T) {
 		t.Fatalf("level=ERROR returned %d rows, want 1", len(res.Rows))
 	}
 	row := res.Rows[0]
-	if row.EffectiveTS == nil {
-		t.Fatal("effective_ts is nil, want COALESCE(time, colon_time) from :time")
+	if row.Time == nil {
+		t.Fatal("time is nil, want the \"time\" field's fallback to \":time\" to have resolved it")
 	}
 	want := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	if !row.EffectiveTS.Equal(want) {
-		t.Errorf("effective_ts = %v, want %v (derived from :time)", row.EffectiveTS, want)
+	if !row.Time.Equal(want) {
+		t.Errorf("time = %v, want %v (resolved from the :time fallback key)", row.Time, want)
 	}
-	if row.Msg == nil || *row.Msg != "second" {
-		t.Errorf("msg = %v, want \"second\"", row.Msg)
+	if row.Fields["msg"] != "second" {
+		t.Errorf("msg = %q, want \"second\"", row.Fields["msg"])
 	}
-	if row.StudyUID == nil || *row.StudyUID != "S1" {
-		t.Errorf("study_uid = %v, want \"S1\"", row.StudyUID)
+	if row.Fields["study_uid"] != "S1" {
+		t.Errorf("study_uid = %q, want \"S1\"", row.Fields["study_uid"])
 	}
 
-	res, err = db.Search(ctx, "b1", Filters{Accession: "A1"})
+	res, err = db.Search(ctx, w, Filters{Fields: map[string]string{"accession": "A1"}})
 	if err != nil {
 		t.Fatalf("Search accession: %v", err)
 	}
-	if len(res.Rows) != 1 || res.Rows[0].Msg == nil || *res.Rows[0].Msg != "first" {
+	if len(res.Rows) != 1 || res.Rows[0].Fields["msg"] != "first" {
 		t.Fatalf("accession filter mismatch: %+v", res.Rows)
 	}
 
-	textRes, err := db.Search(ctx, "b1", Filters{Text: "gateway"})
+	textRes, err := db.Search(ctx, w, Filters{Text: "gateway"})
 	if err != nil {
 		t.Fatalf("Search text: %v", err)
 	}
-	if len(textRes.Rows) != 1 || textRes.Rows[0].Topic == nil || *textRes.Rows[0].Topic != "gateway" {
+	if len(textRes.Rows) != 1 || textRes.Rows[0].Fields["topic"] != "gateway" {
 		t.Fatalf("free-text filter over raw mismatch: %+v", textRes.Rows)
 	}
 
-	levels, err := db.DistinctLevels(ctx, "b1")
+	levels, err := db.DistinctLevels(ctx, w)
 	if err != nil {
 		t.Fatalf("DistinctLevels: %v", err)
 	}
@@ -112,7 +131,7 @@ func TestSearchFiltersAndEffectiveTS(t *testing.T) {
 		t.Errorf("DistinctLevels = %v, want 3 distinct non-null levels", levels)
 	}
 
-	raw, err := db.RawLine(ctx, "b1", res.Rows[0].FileHash)
+	raw, err := db.RawLine(ctx, w, res.Rows[0].FileHash)
 	if err != nil {
 		t.Fatalf("RawLine: %v", err)
 	}
@@ -124,13 +143,14 @@ func TestSearchFiltersAndEffectiveTS(t *testing.T) {
 func TestDeleteOlderThan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	w := createTestWiretap(t, db, "w3", DefaultFields())
 
-	if _, err := db.LoadFile(ctx, "b1", "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
 
 	cutoff := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	deleted, err := db.DeleteOlderThan(ctx, "b1", cutoff)
+	deleted, err := db.DeleteOlderThan(ctx, w, cutoff)
 	if err != nil {
 		t.Fatalf("DeleteOlderThan: %v", err)
 	}
@@ -139,7 +159,7 @@ func TestDeleteOlderThan(t *testing.T) {
 		t.Errorf("deleted = %d, want 1", deleted)
 	}
 
-	res, err := db.Search(ctx, "b1", Filters{})
+	res, err := db.Search(ctx, w, Filters{})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -148,22 +168,98 @@ func TestDeleteOlderThan(t *testing.T) {
 	}
 }
 
-func TestTableForBucketSanitizesAndTracks(t *testing.T) {
+func TestCreateWiretapValidation(t *testing.T) {
 	db := openTestDB(t)
+	ctx := context.Background()
 
-	table, err := db.TableForBucket("My.Bucket-123")
-	if err != nil {
-		t.Fatalf("TableForBucket: %v", err)
-	}
-	if table == "" {
-		t.Fatal("sanitized table name is empty")
+	gcsCfg := &GCSSourceConfig{ProjectID: "p", Bucket: "b"}
+
+	_, err := db.CreateWiretap(ctx, WiretapInput{
+		Name: "missing-msg", SourceType: SourceTypeGCS, GCS: gcsCfg,
+		Fields: []parse.Field{
+			{Column: "time", JSONKeys: []string{"time"}, Required: true},
+			{Column: "level", JSONKeys: []string{"level"}, Required: true},
+		},
+	})
+	if err == nil {
+		t.Error("expected error for missing required \"msg\" field")
 	}
 
-	buckets, err := db.LoadedBuckets()
-	if err != nil {
-		t.Fatalf("LoadedBuckets: %v", err)
+	badColumnFields := append(append([]parse.Field(nil), DefaultFields()...), parse.Field{
+		Column: "Bad Col!", JSONKeys: []string{"x"},
+	})
+	if _, err := db.CreateWiretap(ctx, WiretapInput{Name: "bad-col", SourceType: SourceTypeGCS, GCS: gcsCfg, Fields: badColumnFields}); err == nil {
+		t.Error("expected error for invalid column name")
 	}
-	if len(buckets) != 1 || buckets[0] != "My.Bucket-123" {
-		t.Errorf("LoadedBuckets = %v, want the original bucket name preserved", buckets)
+
+	if _, err := db.CreateWiretap(ctx, WiretapInput{Name: "dup", SourceType: SourceTypeGCS, GCS: gcsCfg, Fields: DefaultFields()}); err != nil {
+		t.Fatalf("CreateWiretap: %v", err)
+	}
+	if _, err := db.CreateWiretap(ctx, WiretapInput{Name: "dup", SourceType: SourceTypeGCS, GCS: gcsCfg, Fields: DefaultFields()}); err == nil {
+		t.Error("expected error creating a second wiretap with the same name")
+	}
+}
+
+func TestUpdateWiretapAddsColumn(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w4", DefaultFields())
+
+	newFields := append(append([]parse.Field(nil), DefaultFields()...), parse.Field{
+		Column: "custom_field", JSONKeys: []string{"custom_field"},
+	})
+	updated, err := db.UpdateWiretap(ctx, w.ID, WiretapInput{
+		Prefix: "logs/", Fields: newFields,
+		RetentionDays: 30, AutoLoadEnabled: true, PollIntervalMinutes: 5,
+	})
+	if err != nil {
+		t.Fatalf("UpdateWiretap: %v", err)
+	}
+
+	found := false
+	for _, f := range updated.Fields {
+		if f.Column == "custom_field" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("custom_field missing from updated wiretap's Fields")
+	}
+	if updated.Prefix != "logs/" || updated.RetentionDays != 30 || !updated.AutoLoadEnabled || updated.PollIntervalMinutes != 5 {
+		t.Errorf("wiretap settings not applied: %+v", updated)
+	}
+
+	line := `{"time":"2024-03-01T00:00:00Z","level":"INFO","msg":"hi","custom_field":"xyz"}` + "\n"
+	if _, err := db.LoadFile(ctx, updated, "g.jsonl", strings.NewReader(line)); err != nil {
+		t.Fatalf("LoadFile after ALTER TABLE: %v", err)
+	}
+	res, err := db.Search(ctx, updated, Filters{Fields: map[string]string{"custom_field": "xyz"}})
+	if err != nil {
+		t.Fatalf("Search on new column: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected 1 row matching the new field filter, got %d", len(res.Rows))
+	}
+}
+
+func TestDeleteWiretapDropsTable(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w5", DefaultFields())
+
+	if err := db.DeleteWiretap(ctx, w.ID); err != nil {
+		t.Fatalf("DeleteWiretap: %v", err)
+	}
+
+	wiretaps, err := db.ListWiretaps(ctx)
+	if err != nil {
+		t.Fatalf("ListWiretaps: %v", err)
+	}
+	if len(wiretaps) != 0 {
+		t.Errorf("ListWiretaps = %v, want none after delete", wiretaps)
+	}
+
+	if _, err := db.Search(ctx, w, Filters{}); err == nil {
+		t.Error("expected an error searching a dropped wiretap's table")
 	}
 }

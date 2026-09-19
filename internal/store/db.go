@@ -1,4 +1,4 @@
-// Package store owns the single embedded DuckDB file — one table per bucket, plus ingestion metadata.
+// Package store owns the single embedded DuckDB file — one table per wiretap, plus ingestion metadata.
 package store
 
 import (
@@ -9,14 +9,14 @@ import (
 
 	_ "github.com/marcboeker/go-duckdb"
 
-	"logviewer/internal/appdir"
+	"ducktective/internal/appdir"
 )
 
 type DB struct {
 	sql *sql.DB
 }
 
-// Open resolves <UserConfigDir>/logviewer/logviewer.duckdb, creating the directory and running migrations.
+// Open resolves <UserConfigDir>/ducktective/ducktective.duckdb, creating the directory and running migrations.
 func Open() (*DB, error) {
 	dir, err := appdir.Dir()
 	if err != nil {
@@ -25,7 +25,7 @@ func Open() (*DB, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return OpenAt(filepath.Join(dir, "logviewer.duckdb"))
+	return OpenAt(filepath.Join(dir, "ducktective.duckdb"))
 }
 
 // OpenAt opens (or creates) the DuckDB file at an explicit path, running migrations. Exists separately from
@@ -50,16 +50,26 @@ func (db *DB) Close() error {
 
 func (db *DB) migrate() error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS _meta_bucket_tables (
-			bucket_name TEXT PRIMARY KEY,
-			table_name TEXT NOT NULL
+		`CREATE TABLE IF NOT EXISTS _meta_wiretaps (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			source_type TEXT NOT NULL,
+			gcs_config_json TEXT,
+			prefix TEXT NOT NULL,
+			table_name TEXT NOT NULL,
+			fields_json TEXT NOT NULL,
+			retention_days INTEGER NOT NULL DEFAULT 0,
+			auto_load_enabled BOOLEAN NOT NULL DEFAULT false,
+			poll_interval_minutes INTEGER NOT NULL DEFAULT 15,
+			created_at TIMESTAMP NOT NULL,
+			last_polled_at TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS _meta_ingested_files (
-			bucket_name TEXT NOT NULL,
+			wiretap_id TEXT NOT NULL,
 			file_name TEXT NOT NULL,
 			ingested_at TIMESTAMP NOT NULL,
 			rows_ingested INTEGER NOT NULL,
-			PRIMARY KEY (bucket_name, file_name)
+			PRIMARY KEY (wiretap_id, file_name)
 		)`,
 	}
 	for _, s := range stmts {

@@ -8,7 +8,8 @@
     --border: #263248;
     --text: #d7dde5;
     --text-dim: #7c8ba1;
-    --accent: #3b82f6;
+    --accent: #ffc94a;
+    --accent-ink: #1a1400;
     --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
@@ -39,6 +40,12 @@ body {
     margin-right: 8px;
 }
 
+.app-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+}
+
 .pill {
     margin-left: auto;
     padding: 4px 10px;
@@ -51,6 +58,37 @@ body {
 .pill-ok { background: #16332a; color: #7fd9a8; }
 .pill-error { background: #3a1d1d; color: #f0a1a1; }
 
+.view-tabs {
+    display: flex;
+    gap: 4px;
+}
+
+.tab-btn {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-dim);
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+.tab-btn.active {
+    background: var(--bg-panel);
+    color: var(--text);
+}
+
+.link-btn {
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    padding: 0;
+    text-decoration: underline;
+    font-size: inherit;
+}
+
+.query-bar-row {
+    margin-bottom: 10px;
+}
+
 .empty-state {
     color: var(--text-dim);
     padding: 40px 0;
@@ -59,7 +97,7 @@ body {
 
 .query-bar {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 8px;
     background: var(--bg-panel);
     border: 1px solid var(--border);
@@ -68,13 +106,106 @@ body {
     margin-bottom: 6px;
 }
 
-.query-bar input[type="text"] {
+.query-bar-row-main, .query-bar-row-dates {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.query-bar-row-main input[type="text"] {
     flex: 1;
     font-family: var(--mono);
 }
 
 .query-bar-sep {
     color: var(--text-dim);
+}
+
+.date-picker {
+    position: relative;
+}
+
+.date-input {
+    width: 120px;
+    font-family: var(--mono);
+    text-align: center;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+}
+
+.cal-popup {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    width: 220px;
+    background: #0c1219;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    z-index: 10;
+    font-family: -apple-system, sans-serif;
+}
+
+.cal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+
+.cal-header button {
+    padding: 2px 8px;
+}
+
+.cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+}
+
+.cal-dow {
+    text-align: center;
+    font-size: 10px;
+    color: var(--text-dim);
+    padding: 2px 0;
+}
+
+.cal-day {
+    text-align: center;
+    font-size: 12px;
+    padding: 4px 0;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.cal-day:hover {
+    background: var(--bg-row-hover);
+}
+
+.cal-day-selected {
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+}
+
+.time-picker {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-family: var(--mono);
+    color: var(--text-dim);
+}
+
+.time-num {
+    width: 42px;
+    text-align: center;
+    padding: 6px 2px;
+}
+
+.scroll-status {
+    text-align: center;
+    margin-top: 10px;
 }
 
 #advanced-filters {
@@ -121,11 +252,19 @@ button:disabled {
     cursor: not-allowed;
 }
 
+/* WebKit (the packaged app's actual webview) ignores plain `color` on disabled fields and falls back
+   to its own low-contrast default, which made populated-but-disabled form fields look blank. */
+input:disabled, select:disabled {
+    color: var(--text-dim);
+    -webkit-text-fill-color: var(--text-dim);
+    opacity: 1;
+}
+
 .primary-btn {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
-    font-weight: 500;
+    color: var(--accent-ink);
+    font-weight: 600;
 }
 
 .ghost-btn {
@@ -297,4 +436,150 @@ table {
 #load-summary {
     margin-top: 8px;
     font-size: 12px;
+}
+
+.wiretaps-toolbar {
+    margin-bottom: 10px;
+}
+
+#wiretaps-table {
+    table-layout: auto;
+}
+
+.row-actions {
+    white-space: nowrap;
+    width: 1%;
+}
+
+.row-actions button {
+    font-size: 12px;
+}
+
+.confirm-danger {
+    color: #f0a1a1;
+    font-weight: 600;
+}
+
+.panel {
+    margin-top: 16px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.panel h2 {
+    margin: 0 0 14px;
+    font-size: 15px;
+}
+
+.wiretap-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 640px;
+}
+
+.wiretap-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.wiretap-form input, .wiretap-form select {
+    font-family: -apple-system, sans-serif;
+}
+
+.source-config {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.searchable-picker {
+    position: relative;
+}
+
+.searchable-picker input {
+    width: 100%;
+}
+
+.picker-list {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    max-height: 220px;
+    overflow-y: auto;
+    background: #0c1219;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    z-index: 10;
+}
+
+.picker-item {
+    padding: 6px 8px;
+    cursor: pointer;
+    font-family: -apple-system, sans-serif;
+}
+
+.picker-item:hover, .picker-item.picker-item-active {
+    background: var(--bg-row-hover);
+}
+
+.picker-empty {
+    padding: 6px 8px;
+    color: var(--text-dim);
+    font-family: -apple-system, sans-serif;
+}
+
+.checkbox-label {
+    flex-direction: row !important;
+    align-items: center;
+    gap: 6px !important;
+}
+
+.checkbox-label input { width: auto; }
+
+.fields-editor h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin: 4px 0 8px;
+}
+
+.fields-editor-table {
+    width: 100%;
+    font-family: -apple-system, sans-serif;
+}
+
+.fields-editor-table th {
+    text-align: left;
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 4px 6px;
+}
+
+.fields-editor-table td {
+    padding: 3px 6px;
+}
+
+.fields-editor-table input {
+    width: 100%;
+}
+
+.field-required-note {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-style: italic;
+}
+
+.status-error {
+    color: #f0a1a1;
 }

@@ -3,7 +3,8 @@ export namespace app {
 	export class FileEntry {
 	    name: string;
 	    size: number;
-	    lastModified: time.Time;
+	    // Go type: time
+	    lastModified: any;
 	    loaded: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -14,7 +15,7 @@ export namespace app {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.size = source["size"];
-	        this.lastModified = this.convertValues(source["lastModified"], time.Time);
+	        this.lastModified = this.convertValues(source["lastModified"], null);
 	        this.loaded = source["loaded"];
 	    }
 	
@@ -40,6 +41,7 @@ export namespace app {
 	    name: string;
 	    rowsInserted: number;
 	    linesSkipped: number;
+	    alreadyLoaded?: boolean;
 	    error?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -51,6 +53,7 @@ export namespace app {
 	        this.name = source["name"];
 	        this.rowsInserted = source["rowsInserted"];
 	        this.linesSkipped = source["linesSkipped"];
+	        this.alreadyLoaded = source["alreadyLoaded"];
 	        this.error = source["error"];
 	    }
 	}
@@ -77,6 +80,20 @@ export namespace gcp {
 	        this.message = source["message"];
 	    }
 	}
+	export class Project {
+	    id: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Project(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	    }
+	}
 
 }
 
@@ -97,17 +114,38 @@ export namespace gcs {
 
 }
 
+export namespace parse {
+	
+	export class Field {
+	    column: string;
+	    jsonKeys: string[];
+	    required: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Field(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.column = source["column"];
+	        this.jsonKeys = source["jsonKeys"];
+	        this.required = source["required"];
+	    }
+	}
+
+}
+
 export namespace store {
 	
 	export class Filters {
-	    timeFrom?: time.Time;
-	    timeTo?: time.Time;
+	    // Go type: time
+	    timeFrom?: any;
+	    // Go type: time
+	    timeTo?: any;
 	    level: string;
-	    msg: string;
-	    topic: string;
-	    accession: string;
-	    studyUid: string;
+	    fields: Record<string, string>;
 	    text: string;
+	    offset: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Filters(source);
@@ -115,14 +153,12 @@ export namespace store {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.timeFrom = this.convertValues(source["timeFrom"], time.Time);
-	        this.timeTo = this.convertValues(source["timeTo"], time.Time);
+	        this.timeFrom = this.convertValues(source["timeFrom"], null);
+	        this.timeTo = this.convertValues(source["timeTo"], null);
 	        this.level = source["level"];
-	        this.msg = source["msg"];
-	        this.topic = source["topic"];
-	        this.accession = source["accession"];
-	        this.studyUid = source["studyUid"];
+	        this.fields = source["fields"];
 	        this.text = source["text"];
+	        this.offset = source["offset"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -143,14 +179,26 @@ export namespace store {
 		    return a;
 		}
 	}
+	export class GCSSourceConfig {
+	    projectId: string;
+	    bucket: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GCSSourceConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectId = source["projectId"];
+	        this.bucket = source["bucket"];
+	    }
+	}
 	export class LogRow {
 	    fileHash: string;
-	    effectiveTs?: time.Time;
+	    // Go type: time
+	    time?: any;
 	    level?: string;
-	    msg?: string;
-	    topic?: string;
-	    accession?: string;
-	    studyUid?: string;
+	    fields: Record<string, string>;
 	    sourceFile: string;
 	    sourceLine: number;
 	
@@ -161,12 +209,9 @@ export namespace store {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.fileHash = source["fileHash"];
-	        this.effectiveTs = this.convertValues(source["effectiveTs"], time.Time);
+	        this.time = this.convertValues(source["time"], null);
 	        this.level = source["level"];
-	        this.msg = source["msg"];
-	        this.topic = source["topic"];
-	        this.accession = source["accession"];
-	        this.studyUid = source["studyUid"];
+	        this.fields = source["fields"];
 	        this.sourceFile = source["sourceFile"];
 	        this.sourceLine = source["sourceLine"];
 	    }
@@ -191,7 +236,7 @@ export namespace store {
 	}
 	export class SearchResult {
 	    rows: LogRow[];
-	    truncated: boolean;
+	    hasMore: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new SearchResult(source);
@@ -200,7 +245,7 @@ export namespace store {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.rows = this.convertValues(source["rows"], LogRow);
-	        this.truncated = source["truncated"];
+	        this.hasMore = source["hasMore"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -221,22 +266,103 @@ export namespace store {
 		    return a;
 		}
 	}
-
-}
-
-export namespace time {
-	
-	export class Time {
-	
+	export class Wiretap {
+	    id: string;
+	    name: string;
+	    sourceType: string;
+	    gcs?: GCSSourceConfig;
+	    prefix: string;
+	    tableName: string;
+	    fields: parse.Field[];
+	    retentionDays: number;
+	    autoLoadEnabled: boolean;
+	    pollIntervalMinutes: number;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    lastPolledAt?: any;
 	
 	    static createFrom(source: any = {}) {
-	        return new Time(source);
+	        return new Wiretap(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.sourceType = source["sourceType"];
+	        this.gcs = this.convertValues(source["gcs"], GCSSourceConfig);
+	        this.prefix = source["prefix"];
+	        this.tableName = source["tableName"];
+	        this.fields = this.convertValues(source["fields"], parse.Field);
+	        this.retentionDays = source["retentionDays"];
+	        this.autoLoadEnabled = source["autoLoadEnabled"];
+	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.lastPolledAt = this.convertValues(source["lastPolledAt"], null);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class WiretapInput {
+	    name: string;
+	    sourceType: string;
+	    gcs?: GCSSourceConfig;
+	    prefix: string;
+	    fields: parse.Field[];
+	    retentionDays: number;
+	    autoLoadEnabled: boolean;
+	    pollIntervalMinutes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new WiretapInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.sourceType = source["sourceType"];
+	        this.gcs = this.convertValues(source["gcs"], GCSSourceConfig);
+	        this.prefix = source["prefix"];
+	        this.fields = this.convertValues(source["fields"], parse.Field);
+	        this.retentionDays = source["retentionDays"];
+	        this.autoLoadEnabled = source["autoLoadEnabled"];
+	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

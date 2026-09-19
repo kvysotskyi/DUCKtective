@@ -3,77 +3,165 @@
 <head>
     <meta charset="UTF-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-    <title>Log Viewer</title>
+    <title>Ducktective</title>
     <link rel="stylesheet" href="./src/style.css"/>
 </head>
 <body>
 <div id="app">
     <header class="topbar">
-        <h1>Log Viewer</h1>
-        <select id="bucket-select"><option value="">Select a bucket…</option></select>
-        <button id="refresh-buckets-btn" class="ghost-btn" title="Refresh bucket list">⟳</button>
+        <img src="./src/assets/icon.png" alt="" class="app-icon"/>
+        <h1>Ducktective</h1>
+        <nav class="view-tabs">
+            <button id="tab-search" class="tab-btn active">Search</button>
+            <button id="tab-wiretaps" class="tab-btn">Wiretaps</button>
+        </nav>
         <div id="auth-pill" class="pill">Checking credentials…</div>
     </header>
 
-    <div id="bucket-empty-state" class="empty-state">
-        Pick a bucket above to start searching.
-    </div>
-
-    <div id="main" hidden>
-        <div class="query-bar">
-            <input id="query-input" type="text"
-                   placeholder="Search anywhere in the log line — any field, not just the ones below…"/>
-            <input id="filter-from" type="datetime-local" title="From"/>
-            <span class="query-bar-sep">→</span>
-            <input id="filter-to" type="datetime-local" title="To"/>
-            <select id="filter-level"><option value="">All levels</option></select>
-            <button id="search-btn" class="primary-btn">Search</button>
+    <section id="view-search">
+        <div class="query-bar-row">
+            <select id="wiretap-select"><option value="">Select a wiretap…</option></select>
         </div>
 
-        <details id="advanced-filters">
-            <summary>Advanced filters</summary>
-            <div class="advanced-filters-row">
-                <label>Message contains <input id="filter-msg" type="text"/></label>
-                <label>Topic contains <input id="filter-topic" type="text"/></label>
-                <label>Accession contains <input id="filter-accession" type="text"/></label>
-                <label>Study UID contains <input id="filter-studyuid" type="text"/></label>
+        <div id="wiretap-empty-state" class="empty-state">
+            No case open. <button id="goto-wiretaps-btn" class="link-btn">Open a wiretap</button>
+            to start listening.
+        </div>
+
+        <div id="search-main" hidden>
+            <div class="query-bar">
+                <div class="query-bar-row-main">
+                    <input id="query-input" type="text"
+                           placeholder="Search anywhere in the log line — any field, not just the ones below…"/>
+                    <select id="filter-level"><option value="">All levels</option></select>
+                    <button id="search-btn" class="primary-btn">Search</button>
+                    <button id="reset-filters-btn" class="ghost-btn">Reset</button>
+                </div>
+                <div class="query-bar-row-dates">
+                    <div class="date-picker">
+                        <input id="filter-from-date" type="text" class="date-input" placeholder="YYYY-MM-DD"
+                               title="From date — click to open the calendar" readonly autocomplete="off"/>
+                        <div id="filter-from-date-popup" class="cal-popup" hidden></div>
+                    </div>
+                    <div class="time-picker" title="From time (24h) — defaults to 00:00:00 if left blank">
+                        <input id="filter-from-h" type="number" min="0" max="23" placeholder="HH" class="time-num"/>:<input
+                                id="filter-from-m" type="number" min="0" max="59" placeholder="MM" class="time-num"/>:<input
+                                id="filter-from-s" type="number" min="0" max="59" placeholder="SS" class="time-num"/>
+                    </div>
+                    <span class="query-bar-sep">→</span>
+                    <div class="date-picker">
+                        <input id="filter-to-date" type="text" class="date-input" placeholder="YYYY-MM-DD"
+                               title="To date — click to open the calendar" readonly autocomplete="off"/>
+                        <div id="filter-to-date-popup" class="cal-popup" hidden></div>
+                    </div>
+                    <div class="time-picker" title="To time (24h) — defaults to 23:59:59 if left blank">
+                        <input id="filter-to-h" type="number" min="0" max="23" placeholder="HH" class="time-num"/>:<input
+                                id="filter-to-m" type="number" min="0" max="59" placeholder="MM" class="time-num"/>:<input
+                                id="filter-to-s" type="number" min="0" max="59" placeholder="SS" class="time-num"/>
+                    </div>
+                </div>
             </div>
-        </details>
 
-        <div id="search-status" class="status-line"></div>
+            <details id="advanced-filters">
+                <summary>Advanced filters</summary>
+                <div id="advanced-filters-row" class="advanced-filters-row"></div>
+            </details>
 
-        <table id="results-table" class="log-table">
+            <div id="search-status" class="status-line"></div>
+
+            <table id="results-table" class="log-table">
+                <thead>
+                <tr><th class="col-time">Time</th><th class="col-level">Level</th><th>Message</th><th class="col-source">Source</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+
+            <div id="scroll-status" class="status-line scroll-status"></div>
+        </div>
+    </section>
+
+    <section id="view-wiretaps" hidden>
+        <div class="wiretaps-toolbar">
+            <button id="new-wiretap-btn" class="primary-btn">+ New Wiretap</button>
+        </div>
+
+        <div id="wiretaps-status" class="status-line"></div>
+
+        <table id="wiretaps-table" class="log-table">
             <thead>
-            <tr><th class="col-time">Time</th><th class="col-level">Level</th><th>Message</th><th class="col-source">Source</th></tr>
+            <tr>
+                <th>Name</th><th>Source</th><th>Prefix</th><th>Retention</th>
+                <th>Auto-load</th><th>Last polled</th><th></th>
+            </tr>
             </thead>
             <tbody></tbody>
         </table>
 
-        <details class="side-panel">
-            <summary>Load files from GCS</summary>
-            <div class="row">
-                <input id="prefix-input" type="text" placeholder="key prefix, e.g. logs/gateway-2026-09"/>
-                <button id="find-files-btn">Find files</button>
-                <button id="load-files-btn" disabled>Load selected</button>
-            </div>
-            <table class="files-table">
-                <thead>
-                <tr><th></th><th>Name</th><th>Size</th><th>Last modified</th><th>Loaded</th></tr>
-                </thead>
-                <tbody id="files-tbody"></tbody>
-            </table>
-            <div id="load-summary"></div>
-        </details>
+        <div id="wiretap-form-panel" class="panel" hidden>
+            <h2 id="wiretap-form-title">New Wiretap</h2>
 
-        <details class="side-panel">
-            <summary>Retention cleanup</summary>
-            <div class="row">
-                <label>Delete rows older than <input id="retention-cutoff" type="date"/></label>
-                <button id="retention-btn">Delete</button>
-                <span id="retention-status" class="status-line"></span>
+            <div class="wiretap-form">
+                <label>Name <input id="wf-name" type="text"/></label>
+
+                <label>Source type
+                    <select id="wf-source-type">
+                        <option value="gcs">Google Cloud Storage</option>
+                    </select>
+                </label>
+
+                <div id="wf-source-gcs" class="source-config">
+                    <label>Project
+                        <div class="searchable-picker">
+                            <input id="wf-project-input" type="text" placeholder="Search projects…" autocomplete="off"/>
+                            <div id="wf-project-list" class="picker-list" hidden></div>
+                        </div>
+                    </label>
+                    <label>Bucket
+                        <div class="searchable-picker">
+                            <input id="wf-bucket-input" type="text" placeholder="Search buckets…" autocomplete="off" disabled/>
+                            <div id="wf-bucket-list" class="picker-list" hidden></div>
+                        </div>
+                    </label>
+                </div>
+
+                <label>Prefix <input id="wf-prefix" type="text" placeholder="logs/gateway-"/></label>
+
+                <div class="fields-editor">
+                    <h3>Fields</h3>
+                    <table class="fields-editor-table">
+                        <thead><tr><th>Column</th><th>JSON keys (comma-separated, first match wins)</th><th></th></tr></thead>
+                        <tbody id="wf-fields-tbody"></tbody>
+                    </table>
+                    <button id="wf-add-field-btn" class="ghost-btn">+ Add field</button>
+                </div>
+
+                <label>Retention, in days (0 = disabled) <input id="wf-retention" type="number" min="0" value="0"/></label>
+                <label class="checkbox-label"><input id="wf-autoload" type="checkbox"/> Auto-load new files</label>
+                <label>Poll interval, in minutes <input id="wf-poll-interval" type="number" min="1" value="15"/></label>
+
+                <div id="wiretap-form-error" class="status-line status-error"></div>
+
+                <div class="row">
+                    <button id="wf-save-btn" class="primary-btn">Save</button>
+                    <button id="wf-cancel-btn">Cancel</button>
+                </div>
             </div>
-        </details>
-    </div>
+
+            <details class="side-panel">
+                <summary>Browse &amp; load files now</summary>
+                <div class="row">
+                    <input id="wf-browse-prefix" type="text" placeholder="override prefix for this browse, optional"/>
+                    <button id="wf-find-files-btn">Find files</button>
+                    <button id="wf-load-files-btn" disabled>Load selected</button>
+                </div>
+                <table class="files-table">
+                    <thead><tr><th></th><th>Name</th><th>Size</th><th>Last modified</th><th>Loaded</th></tr></thead>
+                    <tbody id="wf-files-tbody"></tbody>
+                </table>
+                <div id="wf-load-summary"></div>
+            </details>
+        </div>
+    </section>
 </div>
 
 <script src="./src/main.js" type="module"></script>

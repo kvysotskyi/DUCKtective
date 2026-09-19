@@ -1,4 +1,4 @@
-// Package appdir resolves the per-OS user-config directory the app stores its database and rule overrides under.
+// Package appdir resolves the per-OS user-config directory the app stores its database under.
 package appdir
 
 import (
@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 )
 
-const appName = "logviewer"
+const appName = "ducktective"
 
-// Dir returns <UserConfigDir>/logviewer, creating nothing itself.
+// Dir returns <UserConfigDir>/ducktective, creating nothing itself.
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {

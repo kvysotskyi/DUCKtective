@@ -1,54 +1,70 @@
-// Package parse turns one NDJSON log line into typed columns per the bucket's field mapping.
+// Package parse turns one NDJSON log line into column values per a watcher's field definitions.
 package parse
 
 import (
 	"encoding/json"
 	"time"
-
-	"logviewer/internal/rules"
 )
 
-// Row holds the typed columns for a single line — every field is optional, nil when absent or unparsable.
-type Row struct {
-	Time       *time.Time
-	ColonTime  *time.Time
-	Level      *string
-	Msg        *string
-	ColonTopic *string
-	Accession  *string
-	StudyUID   *string
-	Raw        string
+// Field maps a column to an ordered list of candidate JSON keys — the first key present with the
+// right-shaped value wins, so one field can absorb multiple producers' spellings of the same concept
+// (e.g. "time" and ":time") without needing a separate column per spelling.
+type Field struct {
+	Column   string   `json:"column"`
+	JSONKeys []string `json:"jsonKeys"`
+	Required bool     `json:"required"`
 }
 
-// Line parses one NDJSON line. ok is false only when the line isn't valid JSON at all — a missing or
-// malformed individual field never drops the line, it just leaves that column nil.
-func Line(raw string, m rules.Mapping) (Row, bool) {
+// TimeColumn is the fixed column name for the one field parsed as a timestamp rather than a string.
+const TimeColumn = "time"
+
+// Line parses one NDJSON line against fields. ok is false only when the line isn't valid JSON at all —
+// a missing or malformed individual field never drops the line, it just leaves that column unset.
+// ts is non-nil only when the "time" field (Column == TimeColumn) resolved to a parsable timestamp.
+func Line(raw string, fields []Field) (values map[string]string, ts *time.Time, ok bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
-		return Row{}, false
+		return nil, nil, false
 	}
 
-	return Row{
-		Time:       parseTimestamp(obj[m.Time]),
-		ColonTime:  parseTimestamp(obj[m.ColonTime]),
-		Level:      parseString(obj[m.Level]),
-		Msg:        parseString(obj[m.Msg]),
-		ColonTopic: parseString(obj[m.ColonTopic]),
-		Accession:  parseString(obj[m.Accession]),
-		StudyUID:   parseString(obj[m.StudyUID]),
-		Raw:        raw,
-	}, true
+	values = make(map[string]string, len(fields))
+	for _, f := range fields {
+		if f.Column == TimeColumn {
+			ts = firstTimestamp(obj, f.JSONKeys)
+			continue
+		}
+		if s := firstString(obj, f.JSONKeys); s != nil {
+			values[f.Column] = *s
+		}
+	}
+	return values, ts, true
 }
 
-func parseString(raw json.RawMessage) *string {
-	if raw == nil {
-		return nil
+func firstString(obj map[string]json.RawMessage, keys []string) *string {
+	for _, key := range keys {
+		raw, present := obj[key]
+		if !present {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return &s
+		}
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil
+	return nil
+}
+
+func firstTimestamp(obj map[string]json.RawMessage, keys []string) *time.Time {
+	for _, key := range keys {
+		raw, present := obj[key]
+		if !present {
+			continue
+		}
+		if t := parseTimestamp(raw); t != nil {
+			return t
+		}
 	}
-	return &s
+	return nil
 }
 
 var timeLayouts = []string{
@@ -59,10 +75,6 @@ var timeLayouts = []string{
 }
 
 func parseTimestamp(raw json.RawMessage) *time.Time {
-	if raw == nil {
-		return nil
-	}
-
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return parseTimeString(s)
@@ -79,7 +91,12 @@ func parseTimestamp(raw json.RawMessage) *time.Time {
 func parseTimeString(s string) *time.Time {
 	for _, layout := range timeLayouts {
 		if t, err := time.Parse(layout, s); err == nil {
-			return &t
+			// Keep the literal wall-clock digits the source wrote, discarding whatever offset came
+			// with them (e.g. "-06:00") — DuckDB's TIMESTAMP column has no timezone concept and
+			// normalizes on write, so passing the offset through would silently convert every
+			// timestamp to a different wall-clock time than what's actually in the log line.
+			wallClock := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+			return &wallClock
 		}
 	}
 	return nil

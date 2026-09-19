@@ -6,8 +6,16 @@ export function CheckAuth() {
   return window['go']['app']['App']['CheckAuth']();
 }
 
-export function DeleteOlderThan(arg1, arg2) {
-  return window['go']['app']['App']['DeleteOlderThan'](arg1, arg2);
+export function CreateWiretap(arg1) {
+  return window['go']['app']['App']['CreateWiretap'](arg1);
+}
+
+export function DefaultFields() {
+  return window['go']['app']['App']['DefaultFields']();
+}
+
+export function DeleteWiretap(arg1) {
+  return window['go']['app']['App']['DeleteWiretap'](arg1);
 }
 
 export function DistinctLevels(arg1) {
@@ -18,22 +26,38 @@ export function GetRawLine(arg1, arg2) {
   return window['go']['app']['App']['GetRawLine'](arg1, arg2);
 }
 
-export function ListBuckets() {
-  return window['go']['app']['App']['ListBuckets']();
+export function ListBuckets(arg1) {
+  return window['go']['app']['App']['ListBuckets'](arg1);
 }
 
-export function ListLoadedBuckets() {
-  return window['go']['app']['App']['ListLoadedBuckets']();
+export function ListObjectsForWiretap(arg1, arg2) {
+  return window['go']['app']['App']['ListObjectsForWiretap'](arg1, arg2);
 }
 
-export function ListObjects(arg1, arg2) {
-  return window['go']['app']['App']['ListObjects'](arg1, arg2);
+export function ListProjects() {
+  return window['go']['app']['App']['ListProjects']();
 }
 
-export function LoadFiles(arg1, arg2) {
-  return window['go']['app']['App']['LoadFiles'](arg1, arg2);
+export function ListWiretaps() {
+  return window['go']['app']['App']['ListWiretaps']();
+}
+
+export function LoadFilesNow(arg1, arg2) {
+  return window['go']['app']['App']['LoadFilesNow'](arg1, arg2);
+}
+
+export function RunRetentionNow(arg1) {
+  return window['go']['app']['App']['RunRetentionNow'](arg1);
 }
 
 export function Search(arg1, arg2) {
   return window['go']['app']['App']['Search'](arg1, arg2);
+}
+
+export function SyncWiretapNow(arg1) {
+  return window['go']['app']['App']['SyncWiretapNow'](arg1);
+}
+
+export function UpdateWiretap(arg1, arg2) {
+  return window['go']['app']['App']['UpdateWiretap'](arg1, arg2);
 }

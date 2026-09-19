@@ -7,80 +7,99 @@ import (
 	"time"
 )
 
-// resultCap is the row cap the UI is told about — results beyond it are trimmed, not silently dropped.
-const resultCap = 1000
+// PageSize is one page of search results — the UI pages through results with Filters.Offset rather
+// than ever loading everything that matches at once.
+const PageSize = 100
 
-// Filters combine with AND; every field is optional and an empty Filters returns everything (up to the cap).
+// Filters combine with AND; every field is optional and an empty Filters returns everything (paged).
 type Filters struct {
-	TimeFrom  *time.Time `json:"timeFrom"`
-	TimeTo    *time.Time `json:"timeTo"`
-	Level     string     `json:"level"`
-	Msg       string     `json:"msg"`
-	Topic     string     `json:"topic"`
-	Accession string     `json:"accession"`
-	StudyUID  string     `json:"studyUid"`
+	TimeFrom *time.Time        `json:"timeFrom"`
+	TimeTo   *time.Time        `json:"timeTo"`
+	Level    string            `json:"level"`
+	// Fields covers every non-time-non-level column (msg included) — column name -> substring match.
+	Fields map[string]string `json:"fields"`
 	// Text matches anywhere in the original raw JSON line — covers fields that don't have their own
-	// extracted column, since a bucket's lines can carry arbitrary extra keys beyond the fixed schema.
-	Text string `json:"text"`
+	// extracted column, since a wiretap's lines can carry arbitrary extra keys beyond its configured fields.
+	Text   string `json:"text"`
+	Offset int    `json:"offset"`
 }
 
 type LogRow struct {
-	FileHash    string     `json:"fileHash"`
-	EffectiveTS *time.Time `json:"effectiveTs"`
-	Level       *string    `json:"level"`
-	Msg         *string    `json:"msg"`
-	Topic       *string    `json:"topic"`
-	Accession   *string    `json:"accession"`
-	StudyUID    *string    `json:"studyUid"`
-	SourceFile  string     `json:"sourceFile"`
-	SourceLine  int        `json:"sourceLine"`
+	FileHash   string            `json:"fileHash"`
+	Time       *time.Time        `json:"time"`
+	Level      *string           `json:"level"`
+	Fields     map[string]string `json:"fields"`
+	SourceFile string            `json:"sourceFile"`
+	SourceLine int               `json:"sourceLine"`
 }
 
 type SearchResult struct {
-	Rows      []LogRow `json:"rows"`
-	Truncated bool     `json:"truncated"`
+	Rows    []LogRow `json:"rows"`
+	HasMore bool     `json:"hasMore"`
+}
+
+func otherColumns(w Wiretap) []string {
+	cols := make([]string, 0, len(w.Fields))
+	for _, f := range w.Fields {
+		if f.Column == "time" || f.Column == "level" {
+			continue
+		}
+		cols = append(cols, f.Column)
+	}
+	return cols
 }
 
 // Search runs one parameterized query built from whichever filters are set — no SQL ever reaches the caller.
-func (db *DB) Search(ctx context.Context, bucket string, f Filters) (SearchResult, error) {
-	table, err := db.TableForBucket(bucket)
-	if err != nil {
-		return SearchResult{}, err
-	}
-
+func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, error) {
 	var where []string
 	var args []any
 
 	if f.TimeFrom != nil {
-		where = append(where, "COALESCE(time, colon_time) >= ?")
+		where = append(where, `"time" >= ?`)
 		args = append(args, *f.TimeFrom)
 	}
 	if f.TimeTo != nil {
-		where = append(where, "COALESCE(time, colon_time) <= ?")
+		where = append(where, `"time" <= ?`)
 		args = append(args, *f.TimeTo)
 	}
 	if f.Level != "" {
-		where = append(where, "level = ?")
+		where = append(where, `"level" = ?`)
 		args = append(args, f.Level)
 	}
-	addLike := func(col, val string) {
-		if val != "" {
-			where = append(where, col+" LIKE ?")
-			args = append(args, "%"+val+"%")
-		}
-	}
-	addLike("msg", f.Msg)
-	addLike("colon_topic", f.Topic)
-	addLike("accession", f.Accession)
-	addLike("study_uid", f.StudyUID)
-	addLike("raw", f.Text)
 
-	query := `SELECT file_hash, COALESCE(time, colon_time) AS effective_ts, level, msg, colon_topic,
-		accession, study_uid, source_file, source_line FROM "` + table + `"`
+	known := map[string]bool{}
+	for _, c := range otherColumns(w) {
+		known[c] = true
+	}
+	for col, val := range f.Fields {
+		if val == "" || !known[col] {
+			continue
+		}
+		where = append(where, `"`+col+`" LIKE ?`)
+		args = append(args, "%"+val+"%")
+	}
+
+	if f.Text != "" {
+		where = append(where, `raw LIKE ?`)
+		args = append(args, "%"+f.Text+"%")
+	}
+
+	others := otherColumns(w)
+	selectCols := []string{"file_hash", `"time"`, `"level"`}
+	for _, c := range others {
+		selectCols = append(selectCols, `"`+c+`"`)
+	}
+	selectCols = append(selectCols, "source_file", "source_line")
+
+	query := `SELECT ` + strings.Join(selectCols, ", ") + ` FROM "` + w.TableName + `"`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
-	query += fmt.Sprintf(" ORDER BY effective_ts DESC LIMIT %d", resultCap+1)
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	query += fmt.Sprintf(` ORDER BY "time" DESC LIMIT %d OFFSET %d`, PageSize+1, offset)
 
 	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -90,33 +109,51 @@ func (db *DB) Search(ctx context.Context, bucket string, f Filters) (SearchResul
 
 	var result SearchResult
 	for rows.Next() {
-		var r LogRow
-		if err := rows.Scan(&r.FileHash, &r.EffectiveTS, &r.Level, &r.Msg, &r.Topic,
-			&r.Accession, &r.StudyUID, &r.SourceFile, &r.SourceLine); err != nil {
+		var fileHash string
+		var ts *time.Time
+		var level *string
+		otherVals := make([]*string, len(others))
+
+		dest := make([]any, 0, len(selectCols))
+		dest = append(dest, &fileHash, &ts, &level)
+		for i := range otherVals {
+			dest = append(dest, &otherVals[i])
+		}
+		var sourceFile string
+		var sourceLine int
+		dest = append(dest, &sourceFile, &sourceLine)
+
+		if err := rows.Scan(dest...); err != nil {
 			return SearchResult{}, err
 		}
-		result.Rows = append(result.Rows, r)
+
+		row := LogRow{
+			FileHash: fileHash, Time: ts, Level: level,
+			Fields: make(map[string]string, len(others)),
+			SourceFile: sourceFile, SourceLine: sourceLine,
+		}
+		for i, c := range others {
+			if otherVals[i] != nil {
+				row.Fields[c] = *otherVals[i]
+			}
+		}
+		result.Rows = append(result.Rows, row)
 	}
 	if err := rows.Err(); err != nil {
 		return SearchResult{}, err
 	}
 
-	if len(result.Rows) > resultCap {
-		result.Rows = result.Rows[:resultCap]
-		result.Truncated = true
+	if len(result.Rows) > PageSize {
+		result.Rows = result.Rows[:PageSize]
+		result.HasMore = true
 	}
 	return result, nil
 }
 
-// DistinctLevels feeds the level filter's dropdown from values already loaded for this bucket.
-func (db *DB) DistinctLevels(ctx context.Context, bucket string) ([]string, error) {
-	table, err := db.TableForBucket(bucket)
-	if err != nil {
-		return nil, err
-	}
-
+// DistinctLevels feeds the level filter's dropdown from values already loaded for this wiretap.
+func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT DISTINCT level FROM "`+table+`" WHERE level IS NOT NULL ORDER BY level`)
+		`SELECT DISTINCT "level" FROM "`+w.TableName+`" WHERE "level" IS NOT NULL ORDER BY "level"`)
 	if err != nil {
 		return nil, err
 	}
@@ -134,13 +171,8 @@ func (db *DB) DistinctLevels(ctx context.Context, bucket string) ([]string, erro
 }
 
 // RawLine backs the "inspect full line" view.
-func (db *DB) RawLine(ctx context.Context, bucket, fileHash string) (string, error) {
-	table, err := db.TableForBucket(bucket)
-	if err != nil {
-		return "", err
-	}
-
+func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (string, error) {
 	var raw string
-	err = db.sql.QueryRowContext(ctx, `SELECT raw FROM "`+table+`" WHERE file_hash = ?`, fileHash).Scan(&raw)
+	err := db.sql.QueryRowContext(ctx, `SELECT raw FROM "`+w.TableName+`" WHERE file_hash = ?`, fileHash).Scan(&raw)
 	return raw, err
 }
