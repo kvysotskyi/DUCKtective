@@ -2,15 +2,15 @@ name: Build
 
 on:
   push:
+    branches: [main, master]
     tags:
       - "v*"
   pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 env:
-  APP_NAME: logviewer
-  APP_PATH: build/bin/logviewer.app
+  APP_NAME: ducktective
+  APP_PATH: build/bin/ducktective.app
 
 jobs:
   build-macos:
@@ -30,7 +30,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache: true
 
       - name: Setup Node.js
@@ -196,14 +196,14 @@ jobs:
       - name: Upload App Bundle
         uses: actions/upload-artifact@v4
         with:
-          name: logviewer-macOS-${{ matrix.platform.arch }}-app
+          name: ducktective-macOS-${{ matrix.platform.arch }}-app
           path: build/bin/*.app
           retention-days: 30
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: logviewer-macOS-${{ matrix.platform.arch }}-dmg
+          name: ducktective-macOS-${{ matrix.platform.arch }}-dmg
           path: ${{ env.DMG_PATH }}
           retention-days: 30
 
@@ -214,13 +214,13 @@ jobs:
       - name: Download ARM64 app
         uses: actions/download-artifact@v4
         with:
-          name: logviewer-macOS-arm64-app
+          name: ducktective-macOS-arm64-app
           path: arm64
 
       - name: Download AMD64 app
         uses: actions/download-artifact@v4
         with:
-          name: logviewer-macOS-amd64-app
+          name: ducktective-macOS-amd64-app
           path: amd64
 
       - name: Import Developer ID certificate
@@ -377,14 +377,14 @@ jobs:
       - name: Upload Universal App
         uses: actions/upload-artifact@v4
         with:
-          name: logviewer-macOS-universal-app
+          name: ducktective-macOS-universal-app
           path: "*.app"
           retention-days: 30
 
       - name: Upload Universal DMG
         uses: actions/upload-artifact@v4
         with:
-          name: logviewer-macOS-universal-dmg
+          name: ducktective-macOS-universal-dmg
           path: ${{ env.DMG_PATH }}
           retention-days: 30
 
@@ -397,7 +397,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache: true
 
       - name: Setup Node.js
@@ -426,13 +426,13 @@ jobs:
         run: wails build -platform windows/amd64
 
       - name: Zip build
-        run: Compress-Archive -Path build/bin/logviewer.exe -DestinationPath build/bin/logviewer-windows-amd64.zip
+        run: Compress-Archive -Path build/bin/ducktective.exe -DestinationPath build/bin/ducktective-windows-amd64.zip
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: logviewer-windows-amd64
-          path: build/bin/logviewer-windows-amd64.zip
+          name: ducktective-windows-amd64
+          path: build/bin/ducktective-windows-amd64.zip
           retention-days: 30
 
   release:
