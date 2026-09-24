@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	duckdb "github.com/marcboeker/go-duckdb"
@@ -28,10 +29,28 @@ type IngestResult struct {
 // unmarshal per line), so cores+2 keeps every core busy without wildly oversubscribing it.
 var parseWorkers = runtime.NumCPU() + 2
 
+// valuesPool recycles the []*string a parsed line's field values land in — a 150K-line file used to
+// mean 150K fresh map[string]string allocations; see internal/store/CLAUDE.md.
+var valuesPool = sync.Pool{
+	New: func() any { return make([]*string, 0, 8) },
+}
+
+func getValues(n int) []*string {
+	v := valuesPool.Get().([]*string)
+	if cap(v) < n {
+		return make([]*string, n)
+	}
+	return v[:n]
+}
+
+func putValues(v []*string) {
+	valuesPool.Put(v[:0])
+}
+
 type parsedLine struct {
 	blank  bool
 	ok     bool
-	values map[string]string
+	values []*string
 	ts     *time.Time
 }
 
@@ -63,7 +82,12 @@ func parseLinesConcurrently(lines []string, fields []parse.Field) []parsedLine {
 					results[i] = parsedLine{blank: true}
 					continue
 				}
-				values, ts, ok := parse.Line(lines[i], fields)
+				values := getValues(len(fields))
+				ts, ok := parse.Line(lines[i], fields, values)
+				if !ok {
+					putValues(values)
+					values = nil
+				}
 				results[i] = parsedLine{ok: ok, values: values, ts: ts}
 			}
 			return nil
@@ -73,35 +97,15 @@ func parseLinesConcurrently(lines []string, fields []parse.Field) []parsedLine {
 	return results
 }
 
-// LoadFile parses every line of objectName concurrently (see parseLinesConcurrently), then bulk-loads the
-// parsed rows into the wiretap's table via DuckDB's native Appender. A prior version built batched
-// multi-row "INSERT ... VALUES (...), (...)" statements instead; measured against a real ~90K-line file
-// that ran at a flat ~600µs/row (batch size made no difference), which pointed at the SQL insert path
-// itself — parsing/planning/binding through the driver — rather than row count as the bottleneck. The
-// Appender writes columnar data chunks directly, bypassing the SQL layer entirely.
-//
-// LoadFile does NOT dedupe — calling it twice for the same file inserts every row twice. Callers must
-// check IsFileLoaded first and skip files that are already loaded (see App.LoadFilesNow /
-// App.autoLoadNewFiles); this is safe because the whole file loads inside one all-or-nothing
-// transaction, so "already fully loaded" is the only duplicate scenario that can occur.
+// ingestChunkLines bounds how many lines LoadFile holds in memory at once (Go side) and how many rows the
+// Appender buffers natively before a Flush — a var so tests can shrink it to exercise chunk boundaries.
+var ingestChunkLines = 10_000
+
+// LoadFile streams objectName through read→parse→append in ingestChunkLines-sized chunks inside one all-or-nothing transaction; it does NOT dedupe — callers check IsFileLoaded first (see internal/store/CLAUDE.md).
 func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.Reader) (IngestResult, error) {
 	loadStart := time.Now()
-
-	readStart := time.Now()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		return IngestResult{}, err
-	}
-	readDur := time.Since(readStart)
-
-	parseStart := time.Now()
-	parsed := parseLinesConcurrently(lines, w.Fields)
-	parseDur := time.Since(parseStart)
 
 	conn, err := db.sql.Conn(ctx)
 	if err != nil {
@@ -122,7 +126,8 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 
 	var result IngestResult
 	now := time.Now().UTC()
-	insertStart := time.Now()
+	var readDur, parseDur, insertDur time.Duration
+	totalLines := 0
 
 	err = conn.Raw(func(driverConn any) error {
 		appender, err := duckdb.NewAppenderFromConn(driverConn.(driver.Conn), "", w.TableName)
@@ -132,43 +137,68 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 		defer appender.Close()
 
 		row := make([]driver.Value, 0, len(w.Fields)+5)
-		for i, p := range parsed {
-			lineNo := i + 1
-			if p.blank {
-				continue
+		lines := make([]string, 0, ingestChunkLines)
+		for {
+			readStart := time.Now()
+			lines = lines[:0]
+			for len(lines) < ingestChunkLines && scanner.Scan() {
+				lines = append(lines, scanner.Text())
 			}
-			if !p.ok {
-				result.LinesSkipped++
-				continue
-			}
-
-			// Column order here must match the physical table layout (see CreateWiretap's DDL
-			// comment): bookkeeping columns first, then fields in Wiretap.Fields order.
-			row = row[:0]
-			row = append(row, fileHash(w.ID, objectName, lineNo), lines[i], objectName, lineNo, now)
-			for _, f := range w.Fields {
-				if f.Column == parse.TimeColumn {
-					row = append(row, timeArg(p.ts))
-					continue
-				}
-				if v, present := p.values[f.Column]; present {
-					row = append(row, v)
-				} else {
-					row = append(row, nil)
-				}
-			}
-
-			if err := appender.AppendRow(row...); err != nil {
+			if err := scanner.Err(); err != nil {
 				return err
 			}
-			result.RowsInserted++
+			readDur += time.Since(readStart)
+			if len(lines) == 0 {
+				return nil
+			}
+
+			parseStart := time.Now()
+			parsed := parseLinesConcurrently(lines, w.Fields)
+			parseDur += time.Since(parseStart)
+
+			insertStart := time.Now()
+			for i, p := range parsed {
+				lineNo := totalLines + i + 1
+				if p.blank {
+					continue
+				}
+				if !p.ok {
+					result.LinesSkipped++
+					continue
+				}
+
+				// Column order here must match the physical table layout (see CreateWiretap's DDL
+				// comment): bookkeeping columns first, then fields in Wiretap.Fields order.
+				row = row[:0]
+				row = append(row, fileHash(w.ID, objectName, lineNo), lines[i], objectName, lineNo, now)
+				for fi, f := range w.Fields {
+					if f.Column == parse.TimeColumn {
+						row = append(row, timeArg(p.ts))
+						continue
+					}
+					if v := p.values[fi]; v != nil {
+						row = append(row, *v)
+					} else {
+						row = append(row, nil)
+					}
+				}
+				putValues(p.values)
+
+				if err := appender.AppendRow(row...); err != nil {
+					return err
+				}
+				result.RowsInserted++
+			}
+			totalLines += len(lines)
+			if err := appender.Flush(); err != nil {
+				return err
+			}
+			insertDur += time.Since(insertStart)
 		}
-		return nil
 	})
 	if err != nil {
 		return result, err
 	}
-	insertDur := time.Since(insertStart)
 
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO _meta_ingested_files (wiretap_id, file_name, ingested_at, rows_ingested)
@@ -186,7 +216,7 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 	committed = true
 
 	log.Printf("[ingest] %s: lines=%d rows=%d skipped=%d read=%s parse=%s(workers=%d) insert=%s total=%s",
-		objectName, len(lines), result.RowsInserted, result.LinesSkipped,
+		objectName, totalLines, result.RowsInserted, result.LinesSkipped,
 		readDur, parseDur, parseWorkers, insertDur, time.Since(loadStart))
 	return result, nil
 }

@@ -140,6 +140,71 @@ func TestSearchFiltersAndTimeFallback(t *testing.T) {
 	}
 }
 
+func TestLoadFileMissingFieldIsNullNotEmptyString(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-missing-field", DefaultFields())
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	// sampleLines' last valid line, {"level":"INFO"}, has no "msg" or "time" key at all — its msg
+	// column must come back as an absent map key (SQL NULL), not present-but-"" (which parse.Line's
+	// pooled []*string values must distinguish via nil, same as the map it replaced).
+	found := false
+	for _, row := range res.Rows {
+		if row.Time == nil {
+			found = true
+			if _, hasMsg := row.Fields["msg"]; hasMsg {
+				t.Errorf("Fields[\"msg\"] present for the row with no msg key, want it absent entirely: %+v", row.Fields)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no row with a nil time found — expected the {\"level\":\"INFO\"} line to survive with time unset")
+	}
+}
+
+func TestLoadFileChunkBoundariesKeepAbsoluteLineNumbers(t *testing.T) {
+	// Shrink the chunk so sampleLines' 5 lines span three chunks ([1,2] [3,4] [5]); source_line and
+	// therefore file_hash must still reflect the absolute position in the file, not the chunk offset.
+	prev := ingestChunkLines
+	ingestChunkLines = 2
+	t.Cleanup(func() { ingestChunkLines = prev })
+
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-chunks", DefaultFields())
+
+	result, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines))
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if result.RowsInserted != 4 || result.LinesSkipped != 1 {
+		t.Fatalf("RowsInserted=%d LinesSkipped=%d, want 4 and 1", result.RowsInserted, result.LinesSkipped)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	got := map[int]bool{}
+	for _, row := range res.Rows {
+		got[row.SourceLine] = true
+	}
+	for _, want := range []int{1, 3, 4, 5} {
+		if !got[want] {
+			t.Errorf("source_line %d missing; got %v (line 2 is the invalid-JSON line)", want, got)
+		}
+	}
+}
+
 func TestDeleteOlderThan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -239,6 +304,45 @@ func TestUpdateWiretapAddsColumn(t *testing.T) {
 	}
 	if len(res.Rows) != 1 {
 		t.Fatalf("expected 1 row matching the new field filter, got %d", len(res.Rows))
+	}
+}
+
+func TestCompactWiretapPreservesRowsAndStaysWritable(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w6", DefaultFields())
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	cutoff := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	if _, err := db.DeleteOlderThan(ctx, w, cutoff); err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+
+	if err := db.CompactWiretap(ctx, w); err != nil {
+		t.Fatalf("CompactWiretap: %v", err)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after compact: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Fatalf("rows after compact = %d, want 3 (the survivors of DeleteOlderThan)", len(res.Rows))
+	}
+
+	// The renamed table must still accept new Appender inserts, not just SELECTs.
+	line := `{"time":"2024-03-01T00:00:00Z","level":"INFO","msg":"after compact"}` + "\n"
+	if _, err := db.LoadFile(ctx, w, "g.jsonl", strings.NewReader(line)); err != nil {
+		t.Fatalf("LoadFile after compact: %v", err)
+	}
+	res, err = db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after post-compact LoadFile: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Fatalf("rows after post-compact LoadFile = %d, want 4", len(res.Rows))
 	}
 }
 

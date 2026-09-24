@@ -13,7 +13,13 @@ import (
 )
 
 type DB struct {
-	sql *sql.DB
+	sql  *sql.DB
+	path string
+}
+
+// Path returns the on-disk file this DB was opened from — used to report file size before/after CompactWiretap.
+func (db *DB) Path() string {
+	return db.path
 }
 
 // Open resolves <UserConfigDir>/ducktective/ducktective.duckdb, creating the directory and running migrations.
@@ -28,15 +34,18 @@ func Open() (*DB, error) {
 	return OpenAt(filepath.Join(dir, "ducktective.duckdb"))
 }
 
+// duckdbMemoryLimit caps DuckDB's buffer pool — its default is 80% of RAM, which it fills and never releases (see CLAUDE.md).
+const duckdbMemoryLimit = "1GB"
+
 // OpenAt opens (or creates) the DuckDB file at an explicit path, running migrations. Exists separately from
 // Open so tests can point it at a temp file instead of the real per-user config directory.
 func OpenAt(path string) (*DB, error) {
-	sqlDB, err := sql.Open("duckdb", path)
+	sqlDB, err := sql.Open("duckdb", path+"?memory_limit="+duckdbMemoryLimit)
 	if err != nil {
 		return nil, err
 	}
 
-	db := &DB{sql: sqlDB}
+	db := &DB{sql: sqlDB, path: path}
 	if err := db.migrate(); err != nil {
 		sqlDB.Close()
 		return nil, err

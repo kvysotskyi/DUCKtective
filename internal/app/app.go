@@ -2,12 +2,13 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"runtime"
+	"runtime/debug"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -212,17 +213,15 @@ var maxConcurrentDownloads = runtime.NumCPU() + 2
 
 type downloadResult struct {
 	name string
-	data []byte
+	body io.ReadCloser
 	err  error
 	dur  time.Duration
 }
 
-// downloadAll fetches every named object with bounded concurrency, streaming results back as each
-// download finishes rather than waiting for the whole batch — so the (sequential, by design — see
-// LoadFile) DB insert for an earlier file can run while later downloads are still in flight.
+// downloadAll opens every named object with bounded concurrency and streams each straight to the consumer as a live io.ReadCloser — callers must Close each result's body (see internal/app/CLAUDE.md).
 func downloadAll(ctx context.Context, src source.Source, names []string) <-chan downloadResult {
 	batchStart := time.Now()
-	results := make(chan downloadResult, len(names))
+	results := make(chan downloadResult, maxConcurrentDownloads)
 	go func() {
 		defer close(results)
 		defer func() {
@@ -234,19 +233,22 @@ func downloadAll(ctx context.Context, src source.Source, names []string) <-chan 
 			g.Go(func() error {
 				start := time.Now()
 				r, err := src.OpenObject(ctx, name)
-				if err != nil {
-					results <- downloadResult{name: name, err: err, dur: time.Since(start)}
-					return nil
-				}
-				data, err := io.ReadAll(r)
-				r.Close()
-				results <- downloadResult{name: name, data: data, err: err, dur: time.Since(start)}
+				results <- downloadResult{name: name, body: r, err: err, dur: time.Since(start)}
 				return nil
 			})
 		}
 		g.Wait()
 	}()
 	return results
+}
+
+// freeMemoryEveryNFiles bounds how long a large backlog can inflate RSS before freeOSMemory gets a
+// chance to run — see internal/app/CLAUDE.md.
+const freeMemoryEveryNFiles = 20
+
+// freeOSMemory forces Go to hand freed heap pages back to the OS immediately instead of via its own lazy scavenger — see internal/app/CLAUDE.md.
+func freeOSMemory() {
+	debug.FreeOSMemory()
 }
 
 func (a *App) emitSyncProgress(wiretapID string, done, total int, current string) {
@@ -292,17 +294,24 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 	for res := range downloadAll(a.ctx, src, toDownload) {
 		done++
 		a.emitSyncProgress(w.ID, done, len(toDownload), res.name)
-		log.Printf("[download] %s: %s", res.name, res.dur)
+		log.Printf("[download] %s: opened in %s", res.name, res.dur)
 		if res.err != nil {
 			summaries[res.name] = LoadSummary{Name: res.name, Error: res.err.Error()}
 			continue
 		}
-		result, err := a.db.LoadFile(a.ctx, w, res.name, bytes.NewReader(res.data))
+		result, err := a.db.LoadFile(a.ctx, w, res.name, res.body)
+		res.body.Close()
 		if err != nil {
 			summaries[res.name] = LoadSummary{Name: res.name, Error: err.Error()}
 			continue
 		}
 		summaries[res.name] = LoadSummary{Name: res.name, RowsInserted: result.RowsInserted, LinesSkipped: result.LinesSkipped}
+		if done%freeMemoryEveryNFiles == 0 {
+			freeOSMemory()
+		}
+	}
+	if len(toDownload) > 0 {
+		freeOSMemory()
 	}
 	log.Printf("[LoadFilesNow] %d file(s) (%d already loaded) in %s", len(names), len(names)-len(toDownload), time.Since(batchStart))
 
@@ -357,14 +366,20 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 	for res := range downloadAll(ctx, src, toLoad) {
 		done++
 		a.emitSyncProgress(w.ID, done, len(toLoad), res.name)
-		log.Printf("[download] %s: %s", res.name, res.dur)
+		log.Printf("[download] %s: opened in %s", res.name, res.dur)
 		if res.err != nil {
 			continue // best-effort — the scheduler/manual sync will retry it next tick
 		}
-		if _, err := a.db.LoadFile(ctx, w, res.name, bytes.NewReader(res.data)); err == nil {
+		_, err := a.db.LoadFile(ctx, w, res.name, res.body)
+		res.body.Close()
+		if err == nil {
 			loaded++
 		}
+		if done%freeMemoryEveryNFiles == 0 {
+			freeOSMemory()
+		}
 	}
+	freeOSMemory()
 	log.Printf("[autoLoadNewFiles] %s: %d file(s) in %s", w.Name, len(toLoad), time.Since(batchStart))
 	return loaded, nil
 }
@@ -383,6 +398,37 @@ func (a *App) RunRetentionNow(wiretapID string) (int64, error) {
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -w.RetentionDays)
 	return a.db.DeleteOlderThan(a.ctx, w, cutoff)
+}
+
+// CompactWiretapNow rewrites the wiretap's table to reclaim disk space DELETE never returns to the OS (see internal/store/CLAUDE.md), reporting how many bytes the database file shrank by.
+func (a *App) CompactWiretapNow(wiretapID string) (int64, error) {
+	if a.dbErr != nil {
+		return 0, a.dbErr
+	}
+	w, err := a.db.GetWiretap(a.ctx, wiretapID)
+	if err != nil {
+		return 0, err
+	}
+	before, err := fileSize(a.db.Path())
+	if err != nil {
+		return 0, err
+	}
+	if err := a.db.CompactWiretap(a.ctx, w); err != nil {
+		return 0, err
+	}
+	after, err := fileSize(a.db.Path())
+	if err != nil {
+		return 0, err
+	}
+	return before - after, nil
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 func (a *App) Search(wiretapID string, filters store.Filters) (store.SearchResult, error) {
