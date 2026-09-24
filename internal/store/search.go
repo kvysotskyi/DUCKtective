@@ -13,9 +13,9 @@ const PageSize = 100
 
 // Filters combine with AND; every field is optional and an empty Filters returns everything (paged).
 type Filters struct {
-	TimeFrom *time.Time        `json:"timeFrom"`
-	TimeTo   *time.Time        `json:"timeTo"`
-	Level    string            `json:"level"`
+	TimeFrom *time.Time `json:"timeFrom"`
+	TimeTo   *time.Time `json:"timeTo"`
+	Level    string     `json:"level"`
 	// Fields covers every non-time-non-level column (msg included) — column name -> substring match.
 	Fields map[string]string `json:"fields"`
 	// Text matches anywhere in the original raw JSON line — covers fields that don't have their own
@@ -101,7 +101,13 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 	}
 	query += fmt.Sprintf(` ORDER BY "time" DESC LIMIT %d OFFSET %d`, PageSize+1, offset)
 
-	rows, err := db.sql.QueryContext(ctx, query, args...)
+	h, err := db.handle(w)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	h.lockRead()
+	defer h.unlockRead()
+	rows, err := h.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -129,7 +135,7 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 
 		row := LogRow{
 			FileHash: fileHash, Time: ts, Level: level,
-			Fields: make(map[string]string, len(others)),
+			Fields:     make(map[string]string, len(others)),
 			SourceFile: sourceFile, SourceLine: sourceLine,
 		}
 		for i, c := range others {
@@ -152,7 +158,13 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 
 // DistinctLevels feeds the level filter's dropdown from values already loaded for this wiretap.
 func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	h, err := db.handle(w)
+	if err != nil {
+		return nil, err
+	}
+	h.lockRead()
+	defer h.unlockRead()
+	rows, err := h.sql.QueryContext(ctx,
 		`SELECT DISTINCT "level" FROM "`+w.TableName+`" WHERE "level" IS NOT NULL ORDER BY "level"`)
 	if err != nil {
 		return nil, err
@@ -172,7 +184,13 @@ func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
 
 // RawLine backs the "inspect full line" view.
 func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (string, error) {
+	h, err := db.handle(w)
+	if err != nil {
+		return "", err
+	}
+	h.lockRead()
+	defer h.unlockRead()
 	var raw string
-	err := db.sql.QueryRowContext(ctx, `SELECT raw FROM "`+w.TableName+`" WHERE file_hash = ?`, fileHash).Scan(&raw)
+	err = h.sql.QueryRowContext(ctx, `SELECT raw FROM "`+w.TableName+`" WHERE file_hash = ?`, fileHash).Scan(&raw)
 	return raw, err
 }

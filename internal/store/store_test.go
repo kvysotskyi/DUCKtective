@@ -2,6 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"math/rand"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,7 +63,7 @@ func TestLoadFileDedupeAndSkip(t *testing.T) {
 
 	// LoadFile itself doesn't dedupe (no per-row uniqueness constraint) — that's the caller's job via
 	// IsFileLoaded, checked here directly rather than through LoadFile.
-	loaded, err := db.IsFileLoaded(ctx, w.ID, "f.jsonl")
+	loaded, err := db.IsFileLoaded(ctx, w, "f.jsonl")
 	if err != nil {
 		t.Fatalf("IsFileLoaded: %v", err)
 	}
@@ -320,7 +324,7 @@ func TestCompactWiretapPreservesRowsAndStaysWritable(t *testing.T) {
 		t.Fatalf("DeleteOlderThan: %v", err)
 	}
 
-	if err := db.CompactWiretap(ctx, w); err != nil {
+	if _, err := db.CompactWiretap(ctx, w); err != nil {
 		t.Fatalf("CompactWiretap: %v", err)
 	}
 
@@ -365,5 +369,193 @@ func TestDeleteWiretapDropsTable(t *testing.T) {
 
 	if _, err := db.Search(ctx, w, Filters{}); err == nil {
 		t.Error("expected an error searching a dropped wiretap's table")
+	}
+	if _, err := os.Stat(db.WiretapPath(w)); !os.IsNotExist(err) {
+		t.Errorf("searching a deleted wiretap must not recreate its file (stat err=%v)", err)
+	}
+}
+
+func TestDeleteWiretapRemovesFile(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-file", DefaultFields())
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+
+	path := db.WiretapPath(w)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("wiretap file %s should exist after load: %v", path, err)
+	}
+	got, err := db.GetWiretap(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWiretap: %v", err)
+	}
+	if got.SizeBytes <= 0 {
+		t.Errorf("SizeBytes = %d, want the wiretap file's size", got.SizeBytes)
+	}
+
+	if err := db.DeleteWiretap(ctx, w.ID); err != nil {
+		t.Fatalf("DeleteWiretap: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("wiretap file still present after delete (stat err=%v)", err)
+	}
+}
+
+func TestCloseIdleReleasesAndReopens(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-idle", DefaultFields())
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if n := db.CloseIdle(0); n != 1 {
+		t.Fatalf("CloseIdle(0) closed %d handle(s), want 1", n)
+	}
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after CloseIdle should transparently reopen: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Errorf("rows after reopen = %d, want 4", len(res.Rows))
+	}
+}
+
+// Builds the pre-split layout by hand (wiretap table and dedup rows inside the catalog file), then
+// opens it and checks everything moved into wiretaps/<id>.duckdb with the data and dedup state intact.
+func TestLegacyLayoutMigrates(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := filepath.Join(dir, "ducktective.duckdb")
+
+	legacy, err := sql.Open("duckdb", catalogPath)
+	if err != nil {
+		t.Fatalf("open legacy: %v", err)
+	}
+	for _, s := range []string{
+		`CREATE TABLE _meta_wiretaps (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, source_type TEXT NOT NULL, gcs_config_json TEXT,
+			prefix TEXT NOT NULL, table_name TEXT NOT NULL, fields_json TEXT NOT NULL,
+			retention_days INTEGER NOT NULL DEFAULT 0, auto_load_enabled BOOLEAN NOT NULL DEFAULT false,
+			poll_interval_minutes INTEGER NOT NULL DEFAULT 15, created_at TIMESTAMP NOT NULL, last_polled_at TIMESTAMP)`,
+		`CREATE TABLE _meta_ingested_files (wiretap_id TEXT NOT NULL, file_name TEXT NOT NULL,
+			ingested_at TIMESTAMP NOT NULL, rows_ingested INTEGER NOT NULL, PRIMARY KEY (wiretap_id, file_name))`,
+		`CREATE TABLE w_legacy (file_hash TEXT, raw TEXT, source_file TEXT, source_line INTEGER, ingested_at TIMESTAMP,
+			"time" TIMESTAMP, "level" TEXT, "msg" TEXT)`,
+		`INSERT INTO _meta_wiretaps VALUES ('legacy', 'legacy', 'gcs', '{"projectId":"p","bucket":"b"}', 'logs/', 'w_legacy',
+			'[{"column":"time","jsonKeys":["time"],"required":true},{"column":"level","jsonKeys":["level"],"required":true},{"column":"msg","jsonKeys":["msg"],"required":true}]',
+			0, false, 15, '2024-01-01 00:00:00', NULL)`,
+		`INSERT INTO w_legacy VALUES
+			('h1', '{"time":"2024-01-01T00:00:00Z","level":"INFO","msg":"one"}', 'f.jsonl', 1, '2024-01-01 00:00:00', '2024-01-01 00:00:00', 'INFO', 'one'),
+			('h2', '{"time":"2024-01-02T00:00:00Z","level":"WARN","msg":"two"}', 'f.jsonl', 2, '2024-01-01 00:00:00', '2024-01-02 00:00:00', 'WARN', 'two')`,
+		`INSERT INTO _meta_ingested_files VALUES ('legacy', 'f.jsonl', '2024-01-01 00:00:00', 2)`,
+	} {
+		if _, err := legacy.Exec(s); err != nil {
+			t.Fatalf("legacy setup %q: %v", s[:40], err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy: %v", err)
+	}
+
+	db, err := OpenAt(catalogPath)
+	if err != nil {
+		t.Fatalf("OpenAt (migration): %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+
+	wiretaps, err := db.ListWiretaps(ctx)
+	if err != nil {
+		t.Fatalf("ListWiretaps: %v", err)
+	}
+	if len(wiretaps) != 1 || wiretaps[0].ID != "legacy" || wiretaps[0].TableName != "w_legacy" {
+		t.Fatalf("ListWiretaps = %+v, want the single migrated wiretap", wiretaps)
+	}
+	w := wiretaps[0]
+
+	if _, err := os.Stat(db.WiretapPath(w)); err != nil {
+		t.Fatalf("per-wiretap file missing after migration: %v", err)
+	}
+	if _, err := os.Stat(db.legacyBackupPath()); err != nil {
+		t.Errorf("legacy backup missing: %v", err)
+	}
+	if legacyLeft, err := db.hasLegacyTables(ctx); err != nil || legacyLeft {
+		t.Errorf("catalog still has wiretap tables after migration (err=%v)", err)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after migration: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("rows after migration = %d, want 2", len(res.Rows))
+	}
+	loaded, err := db.IsFileLoaded(ctx, w, "f.jsonl")
+	if err != nil || !loaded {
+		t.Errorf("IsFileLoaded after migration = %v, %v; want true", loaded, err)
+	}
+
+	// The copied table must keep the physical column order the Appender binds to.
+	line := `{"time":"2024-01-03T00:00:00Z","level":"INFO","msg":"three"}` + "\n"
+	if _, err := db.LoadFile(ctx, w, "g.jsonl", strings.NewReader(line)); err != nil {
+		t.Fatalf("LoadFile into migrated table: %v", err)
+	}
+	res, err = db.Search(ctx, w, Filters{Fields: map[string]string{"msg": "three"}})
+	if err != nil || len(res.Rows) != 1 {
+		t.Fatalf("Search for the post-migration row: rows=%d err=%v", len(res.Rows), err)
+	}
+}
+
+func TestApplyRetentionSizeCapTrimsAndCompacts(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w, err := db.CreateWiretap(ctx, WiretapInput{
+		Name: "w-cap", SourceType: SourceTypeGCS,
+		GCS:    &GCSSourceConfig{ProjectID: "p", Bucket: "b"},
+		Fields: DefaultFields(), MaxSizeMB: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWiretap: %v", err)
+	}
+
+	// Incompressible payload so the file genuinely exceeds the 1MB cap.
+	rng := rand.New(rand.NewSource(1))
+	var sb strings.Builder
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20000; i++ {
+		buf := make([]byte, 80)
+		rng.Read(buf)
+		fmt.Fprintf(&sb, `{"time":"%s","level":"INFO","msg":"%x"}`+"\n",
+			base.Add(time.Duration(i)*time.Second).Format(time.RFC3339), buf)
+	}
+	if _, err := db.LoadFile(ctx, w, "big.jsonl", strings.NewReader(sb.String())); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	before := db.wiretapSize(w.ID)
+	if before <= 1<<20 {
+		t.Fatalf("test needs a file above the 1MB cap, got %d bytes", before)
+	}
+
+	res, err := db.ApplyRetention(ctx, w, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	if res.RowsDeleted == 0 || !res.Compacted {
+		t.Errorf("size cap should trim and compact: %+v", res)
+	}
+	if res.SizeBytes >= before {
+		t.Errorf("file did not shrink: before=%d after=%d", before, res.SizeBytes)
+	}
+	remaining, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(remaining.Rows) == 0 {
+		t.Error("size cap deleted everything; it should trim the oldest fraction per pass")
+	}
+	// Oldest rows go first: the newest line must survive.
+	if remaining.Rows[0].Time == nil || !remaining.Rows[0].Time.Equal(base.Add(19999*time.Second)) {
+		t.Errorf("newest row missing or wrong after trim: %+v", remaining.Rows[0].Time)
 	}
 }

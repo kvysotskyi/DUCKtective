@@ -121,8 +121,23 @@ for the pattern).
 ## scheduler.go
 
 One `time.Ticker` (`pollTick = 1 minute`) per open app instance, started
-in `Startup`. Each tick, every `AutoLoadEnabled` Wiretap whose
-`PollIntervalMinutes` has elapsed since `LastPolledAt` gets
-`autoLoadNewFiles` + retention cleanup (if `RetentionDays > 0`) +
-`MarkPolled`. There is no background service when the app is closed —
+in `Startup`. Each tick, every Wiretap that has *either* `AutoLoadEnabled`
+*or* a retention policy (`RetentionDays > 0` or `MaxSizeMB > 0`) and whose
+`PollIntervalMinutes` has elapsed since `LastPolledAt` gets, in order:
+`autoLoadNewFiles` (if auto-load is on), `db.ApplyRetention` (if it has a
+policy — age expiry, size cap, and compaction in one pass; see
+[internal/store/CLAUDE.md](../store/CLAUDE.md#retention-policy-applyretention)),
+then `MarkPolled`. Retention deliberately no longer depends on auto-load
+being enabled — a wiretap you fill manually still expires. After the loop
+the tick calls `db.CloseIdle(idleHandleTTL)` so wiretaps not touched for
+10 minutes release their DuckDB instance (and its memory cap's worth of
+buffer pool). There is no background service when the app is closed —
 this goroutine simply stops on `Shutdown`.
+
+The tick is one goroutine and processes wiretaps sequentially, and every
+store write path (`LoadFile`, `ApplyRetention`, `CompactWiretap`) takes
+the wiretap's own write mutex — so a UI "Load now"/"Compact" click can no
+longer collide with the scheduler on the same table; it just waits.
+`RunRetentionNow` (the UI button) returns the same `store.RetentionResult`
+the scheduler gets, so the status line can show rows deleted, bytes
+reclaimed, and the resulting size.

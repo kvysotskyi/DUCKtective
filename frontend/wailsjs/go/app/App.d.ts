@@ -30,7 +30,7 @@ export function ListWiretaps():Promise<Array<store.Wiretap>>;
 
 export function LoadFilesNow(arg1:string,arg2:Array<string>):Promise<Array<app.LoadSummary>>;
 
-export function RunRetentionNow(arg1:string):Promise<number>;
+export function RunRetentionNow(arg1:string):Promise<store.RetentionResult>;
 
 export function Search(arg1:string,arg2:store.Filters):Promise<store.SearchResult>;
 

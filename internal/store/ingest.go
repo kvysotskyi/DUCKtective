@@ -107,7 +107,14 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
-	conn, err := db.sql.Conn(ctx)
+	h, err := db.handle(w)
+	if err != nil {
+		return IngestResult{}, err
+	}
+	h.lockWrite()
+	defer h.unlockWrite()
+
+	conn, err := h.sql.Conn(ctx)
 	if err != nil {
 		return IngestResult{}, err
 	}
@@ -221,11 +228,17 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 	return result, nil
 }
 
-func (db *DB) IsFileLoaded(ctx context.Context, wiretapID, objectName string) (bool, error) {
+func (db *DB) IsFileLoaded(ctx context.Context, w Wiretap, objectName string) (bool, error) {
+	h, err := db.handle(w)
+	if err != nil {
+		return false, err
+	}
+	h.lockRead()
+	defer h.unlockRead()
 	var n int
-	err := db.sql.QueryRowContext(ctx,
+	err = h.sql.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM _meta_ingested_files WHERE wiretap_id = ? AND file_name = ?`,
-		wiretapID, objectName,
+		w.ID, objectName,
 	).Scan(&n)
 	return n > 0, err
 }

@@ -9,7 +9,8 @@ Application Default Credentials today) — no SQL ever reaches the UI.
 A **Wiretap** is a configured log source: which bucket/prefix to read,
 which JSON fields to extract into columns (`time`/`level`/`msg` required,
 rest arbitrary), and its own retention + auto-load schedule. Each Wiretap
-gets one DuckDB table (`w_<id>`). See [internal/store/CLAUDE.md](internal/store/CLAUDE.md).
+gets its own DuckDB file (`wiretaps/<id>.duckdb`, holding table `w_<id>`)
+beside a small catalog. See [internal/store/CLAUDE.md](internal/store/CLAUDE.md).
 
 ## Layout
 

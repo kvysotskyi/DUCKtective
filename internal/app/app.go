@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"runtime"
 	"runtime/debug"
 	"time"
@@ -186,7 +185,7 @@ func (a *App) ListObjectsForWiretap(wiretapID, prefixOverride string) ([]FileEnt
 
 	entries := make([]FileEntry, len(objs))
 	for i, o := range objs {
-		loaded, _ := a.db.IsFileLoaded(a.ctx, w.ID, o.Name)
+		loaded, _ := a.db.IsFileLoaded(a.ctx, w, o.Name)
 		entries[i] = FileEntry{ObjectInfo: o, Loaded: loaded}
 	}
 	return entries, nil
@@ -278,7 +277,7 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 	summaries := make(map[string]LoadSummary, len(names))
 	var toDownload []string
 	for _, name := range names {
-		loaded, err := a.db.IsFileLoaded(a.ctx, w.ID, name)
+		loaded, err := a.db.IsFileLoaded(a.ctx, w, name)
 		if err != nil {
 			summaries[name] = LoadSummary{Name: name, Error: err.Error()}
 			continue
@@ -348,7 +347,7 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 
 	var toLoad []string
 	for _, o := range objs {
-		alreadyLoaded, err := a.db.IsFileLoaded(ctx, w.ID, o.Name)
+		alreadyLoaded, err := a.db.IsFileLoaded(ctx, w, o.Name)
 		if err != nil {
 			return 0, err
 		}
@@ -384,23 +383,19 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 	return loaded, nil
 }
 
-// RunRetentionNow applies the wiretap's configured retention period immediately.
-func (a *App) RunRetentionNow(wiretapID string) (int64, error) {
+// RunRetentionNow applies the wiretap's whole retention policy (age, size cap, compaction) immediately.
+func (a *App) RunRetentionNow(wiretapID string) (store.RetentionResult, error) {
 	if a.dbErr != nil {
-		return 0, a.dbErr
+		return store.RetentionResult{}, a.dbErr
 	}
 	w, err := a.db.GetWiretap(a.ctx, wiretapID)
 	if err != nil {
-		return 0, err
+		return store.RetentionResult{}, err
 	}
-	if w.RetentionDays <= 0 {
-		return 0, fmt.Errorf("wiretap has no retention period configured")
-	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -w.RetentionDays)
-	return a.db.DeleteOlderThan(a.ctx, w, cutoff)
+	return a.db.ApplyRetention(a.ctx, w, time.Now().UTC())
 }
 
-// CompactWiretapNow rewrites the wiretap's table to reclaim disk space DELETE never returns to the OS (see internal/store/CLAUDE.md), reporting how many bytes the database file shrank by.
+// CompactWiretapNow rewrites the wiretap's table to reclaim disk space DELETE never returns (see internal/store/CLAUDE.md), reporting bytes its file shrank by.
 func (a *App) CompactWiretapNow(wiretapID string) (int64, error) {
 	if a.dbErr != nil {
 		return 0, a.dbErr
@@ -409,26 +404,7 @@ func (a *App) CompactWiretapNow(wiretapID string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	before, err := fileSize(a.db.Path())
-	if err != nil {
-		return 0, err
-	}
-	if err := a.db.CompactWiretap(a.ctx, w); err != nil {
-		return 0, err
-	}
-	after, err := fileSize(a.db.Path())
-	if err != nil {
-		return 0, err
-	}
-	return before - after, nil
-}
-
-func fileSize(path string) (int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	return info.Size(), nil
+	return a.db.CompactWiretap(a.ctx, w)
 }
 
 func (a *App) Search(wiretapID string, filters store.Filters) (store.SearchResult, error) {

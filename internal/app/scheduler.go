@@ -56,7 +56,8 @@ func (s *scheduler) tick(ctx context.Context) {
 
 	now := time.Now().UTC()
 	for _, w := range wiretaps {
-		if !w.AutoLoadEnabled {
+		hasRetention := w.RetentionDays > 0 || w.MaxSizeMB > 0
+		if !w.AutoLoadEnabled && !hasRetention {
 			continue
 		}
 		due := w.LastPolledAt == nil ||
@@ -65,12 +66,13 @@ func (s *scheduler) tick(ctx context.Context) {
 			continue
 		}
 
-		if _, err := s.app.autoLoadNewFiles(ctx, w); err != nil {
-			println("scheduler: auto-load for wiretap", w.ID, "failed:", err.Error())
+		if w.AutoLoadEnabled {
+			if _, err := s.app.autoLoadNewFiles(ctx, w); err != nil {
+				println("scheduler: auto-load for wiretap", w.ID, "failed:", err.Error())
+			}
 		}
-		if w.RetentionDays > 0 {
-			cutoff := now.AddDate(0, 0, -w.RetentionDays)
-			if _, err := s.app.db.DeleteOlderThan(ctx, w, cutoff); err != nil {
+		if hasRetention {
+			if _, err := s.app.db.ApplyRetention(ctx, w, now); err != nil {
 				println("scheduler: retention for wiretap", w.ID, "failed:", err.Error())
 			}
 		}
@@ -78,4 +80,8 @@ func (s *scheduler) tick(ctx context.Context) {
 			println("scheduler: mark polled for wiretap", w.ID, "failed:", err.Error())
 		}
 	}
+	s.app.db.CloseIdle(idleHandleTTL)
 }
+
+// idleHandleTTL is how long a wiretap's DuckDB instance stays open unused before its memory is released.
+const idleHandleTTL = 10 * time.Minute
