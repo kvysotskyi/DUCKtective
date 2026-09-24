@@ -171,6 +171,40 @@ func TestLoadFileMissingFieldIsNullNotEmptyString(t *testing.T) {
 	}
 }
 
+func TestLoadFileChunkBoundariesKeepAbsoluteLineNumbers(t *testing.T) {
+	// Shrink the chunk so sampleLines' 5 lines span three chunks ([1,2] [3,4] [5]); source_line and
+	// therefore file_hash must still reflect the absolute position in the file, not the chunk offset.
+	prev := ingestChunkLines
+	ingestChunkLines = 2
+	t.Cleanup(func() { ingestChunkLines = prev })
+
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-chunks", DefaultFields())
+
+	result, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines))
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if result.RowsInserted != 4 || result.LinesSkipped != 1 {
+		t.Fatalf("RowsInserted=%d LinesSkipped=%d, want 4 and 1", result.RowsInserted, result.LinesSkipped)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	got := map[int]bool{}
+	for _, row := range res.Rows {
+		got[row.SourceLine] = true
+	}
+	for _, want := range []int{1, 3, 4, 5} {
+		if !got[want] {
+			t.Errorf("source_line %d missing; got %v (line 2 is the invalid-JSON line)", want, got)
+		}
+	}
+}
+
 func TestDeleteOlderThan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

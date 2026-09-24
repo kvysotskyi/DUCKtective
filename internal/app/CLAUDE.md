@@ -93,6 +93,16 @@ finished); the batch-end-only call is too late to matter during a sync
 that's still running. This doesn't change peak usage, just how long the
 OS-visible number stays inflated.
 
+**But the Go heap was never the main problem.** While Go sat at
+~120–220MB live, `vmmap -summary <pid>` showed ~6GB in `MALLOC_SMALL` —
+DuckDB's native buffer pool, invisible to pprof — with the machine at
+10.5GB of swap. That fix lives in `internal/store` (`memory_limit` DSN
+cap, chunked `LoadFile`, periodic `Appender.Flush`); see
+[internal/store/CLAUDE.md](../store/CLAUDE.md#memory-the-big-consumer-is-duckdbs-heap-not-gos).
+Lesson for next time: when RSS and pprof disagree by more than ~2x, run
+`vmmap -summary` before touching Go code — `VM_ALLOCATE` is Go,
+`MALLOC_*` is DuckDB (or any other cgo library).
+
 Both paths log `[download]`/`[LoadFilesNow]`/`[autoLoadNewFiles]` timing
 lines via the standard `log` package — check these first if load
 performance regresses.

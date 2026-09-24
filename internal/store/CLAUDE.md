@@ -37,10 +37,11 @@ every call site that builds SQL from `f.Column`.
 
 ## LoadFile — why it's an Appender, not INSERT
 
-`LoadFile` (ingest.go) parses all lines of a file concurrently
-(`parseLinesConcurrently`, worker pool sized `runtime.NumCPU()+2`), then
-bulk-loads the parsed rows via `github.com/marcboeker/go-duckdb`'s native
-**Appender** API — not a batched multi-row SQL `INSERT`. That was tried
+`LoadFile` (ingest.go) streams a file in `ingestChunkLines` (10K) line
+chunks — read a chunk, parse it concurrently (`parseLinesConcurrently`,
+worker pool sized `runtime.NumCPU()+2`), append it, `Flush`, repeat — all
+inside one transaction. Rows go through `github.com/marcboeker/go-duckdb`'s
+native **Appender** API — not a batched multi-row SQL `INSERT`. That was tried
 first and measured, against a real ~90K-line file, at a flat ~600µs/row
 *regardless of batch size* (1 row or 1000 rows per statement made no
 difference) — the bottleneck was the SQL insert path itself (parse/plan/
@@ -75,6 +76,34 @@ Callers must check `IsFileLoaded` first and skip files already loaded
 [internal/app](../app/CLAUDE.md)) — safe because each file loads inside
 one all-or-nothing transaction, so "already fully loaded" is the only
 duplicate scenario that can occur.
+
+## Memory: the big consumer is DuckDB's heap, not Go's
+
+Diagnosed on a real 16GB-database install that was pushing the machine to
+10.5GB of swap during loads. Go pprof showed a healthy ~120–220MB live
+heap the whole time — because the memory wasn't Go's. `vmmap -summary
+<pid>` attributed ~6GB (mostly swapped out) to `MALLOC_SMALL`, i.e. C
+`malloc` — DuckDB's own buffer pool, which pprof cannot see at all. Its
+default `memory_limit` is 80% of RAM (12.7GiB here); every insert,
+retention `DELETE` scan, `CHECKPOINT`, and `raw`-column search pulls
+blocks into that pool and it keeps them until it hits the limit, leaving
+macOS to swap them out. Three things bound this, in order of impact:
+
+1. `OpenAt` passes `?memory_limit=` (`duckdbMemoryLimit`, 1GB) in the DSN
+   — go-duckdb forwards DSN query params to `duckdb_set_config`. DuckDB
+   spills to its default `<db>.tmp` directory when it needs more.
+2. `LoadFile` calls `appender.Flush()` after every chunk, so the Appender's
+   native data chunks never hold a whole file.
+3. `LoadFile` chunks the read/parse itself (`ingestChunkLines`), so the Go
+   working set is one chunk's worth of `lines`/`parsed`/values regardless
+   of file size — which is also what makes `valuesPool` actually recycle
+   within a file instead of only across files. See
+   `TestLoadFileChunkBoundariesKeepAbsoluteLineNumbers`: `source_line` and
+   `file_hash` must use the absolute line number, not the chunk offset.
+
+To re-check attribution later: in `vmmap -summary`, `VM_ALLOCATE` ≈ Go's
+heap, `MALLOC_*` ≈ DuckDB. If `MALLOC_SMALL` grows past ~1GB the cap isn't
+being applied.
 
 ## compact.go — why DELETE/VACUUM don't shrink the file
 

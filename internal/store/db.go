@@ -34,10 +34,13 @@ func Open() (*DB, error) {
 	return OpenAt(filepath.Join(dir, "ducktective.duckdb"))
 }
 
+// duckdbMemoryLimit caps DuckDB's buffer pool — its default is 80% of RAM, which it fills and never releases (see CLAUDE.md).
+const duckdbMemoryLimit = "1GB"
+
 // OpenAt opens (or creates) the DuckDB file at an explicit path, running migrations. Exists separately from
 // Open so tests can point it at a temp file instead of the real per-user config directory.
 func OpenAt(path string) (*DB, error) {
-	sqlDB, err := sql.Open("duckdb", path)
+	sqlDB, err := sql.Open("duckdb", path+"?memory_limit="+duckdbMemoryLimit)
 	if err != nil {
 		return nil, err
 	}
