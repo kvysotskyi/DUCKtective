@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"runtime"
 	"time"
 
@@ -377,6 +378,37 @@ func (a *App) RunRetentionNow(wiretapID string) (int64, error) {
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -w.RetentionDays)
 	return a.db.DeleteOlderThan(a.ctx, w, cutoff)
+}
+
+// CompactWiretapNow rewrites the wiretap's table to reclaim disk space DELETE never returns to the OS (see internal/store/CLAUDE.md), reporting how many bytes the database file shrank by.
+func (a *App) CompactWiretapNow(wiretapID string) (int64, error) {
+	if a.dbErr != nil {
+		return 0, a.dbErr
+	}
+	w, err := a.db.GetWiretap(a.ctx, wiretapID)
+	if err != nil {
+		return 0, err
+	}
+	before, err := fileSize(a.db.Path())
+	if err != nil {
+		return 0, err
+	}
+	if err := a.db.CompactWiretap(a.ctx, w); err != nil {
+		return 0, err
+	}
+	after, err := fileSize(a.db.Path())
+	if err != nil {
+		return 0, err
+	}
+	return before - after, nil
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 func (a *App) Search(wiretapID string, filters store.Filters) (store.SearchResult, error) {

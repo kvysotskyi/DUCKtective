@@ -12,6 +12,7 @@ ever reaches the UI — every query is built here from typed Go structs.
 - `ingest.go` — `LoadFile`: parse + bulk insert.
 - `search.go` — `Search`, `DistinctLevels`, `RawLine`.
 - `retention.go` — `DeleteOlderThan`.
+- `compact.go` — `CompactWiretap`: rewrite-and-swap to reclaim disk space `DeleteOlderThan` leaves behind.
 - `schema.go` — `sanitizeIdent` (Wiretap name → safe table/id suffix).
 
 ## ⚠️ Table column order is load-bearing
@@ -60,6 +61,22 @@ Callers must check `IsFileLoaded` first and skip files already loaded
 [internal/app](../app/CLAUDE.md)) — safe because each file loads inside
 one all-or-nothing transaction, so "already fully loaded" is the only
 duplicate scenario that can occur.
+
+## compact.go — why DELETE/VACUUM don't shrink the file
+
+Confirmed empirically against a real 13.7GB installation: `pragma_database_size()`
+showed ~41% of the file was blocks DuckDB had already freed from past
+`DeleteOlderThan` calls but never returned to the OS. DuckDB only frees a
+storage block once *every* row in it is dead; `DeleteOlderThan`'s deletes are
+scattered across blocks (rows land wherever `LoadFile`'s Appender happened to
+write them, not clustered by `time`), so in practice almost no block is ever
+100% dead, and neither an automatic checkpoint (runs on `db.Close`) nor an
+explicit `VACUUM` reclaims the space. `CompactWiretap` sidesteps this
+entirely by rewriting the table (`CREATE TABLE ... AS SELECT * FROM ...`,
+`DROP`, `RENAME`, all in one transaction) — every block the rewrite produces
+holds only live rows, so the following `CHECKPOINT` reliably shrinks the
+file. Retention only marks rows dead; compacting is what actually reclaims
+the space.
 
 ## search.go conventions
 

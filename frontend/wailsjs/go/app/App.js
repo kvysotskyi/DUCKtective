@@ -6,6 +6,10 @@ export function CheckAuth() {
   return window['go']['app']['App']['CheckAuth']();
 }
 
+export function CompactWiretapNow(arg1) {
+  return window['go']['app']['App']['CompactWiretapNow'](arg1);
+}
+
 export function CreateWiretap(arg1) {
   return window['go']['app']['App']['CreateWiretap'](arg1);
 }

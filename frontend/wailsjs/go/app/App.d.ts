@@ -8,6 +8,8 @@ import {app} from '../models';
 
 export function CheckAuth():Promise<gcp.AuthStatus>;
 
+export function CompactWiretapNow(arg1:string):Promise<number>;
+
 export function CreateWiretap(arg1:store.WiretapInput):Promise<store.Wiretap>;
 
 export function DefaultFields():Promise<Array<parse.Field>>;

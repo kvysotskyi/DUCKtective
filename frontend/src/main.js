@@ -11,6 +11,7 @@ import {
     LoadFilesNow,
     SyncWiretapNow,
     RunRetentionNow,
+    CompactWiretapNow,
     Search,
     DistinctLevels,
     GetRawLine,
@@ -625,6 +626,7 @@ function renderWiretapsTable() {
         actionsTd.className = 'row-actions';
         actionsTd.appendChild(actionButton('Load now', () => onSyncWiretapNow(w.id)));
         actionsTd.appendChild(actionButton('Run retention', () => onRunRetentionNow(w.id)));
+        actionsTd.appendChild(actionButton('Compact', () => onCompactWiretapNow(w.id)));
         actionsTd.appendChild(actionButton('Edit', () => openWiretapForm(w.id)));
 
         const isPendingDelete = pendingDeleteId === w.id;
@@ -665,6 +667,17 @@ async function onRunRetentionNow(id) {
         setWiretapsStatus(`Deleted ${deleted} row(s).`);
     } catch (err) {
         setWiretapsStatus(`Retention failed: ${err}`);
+    }
+}
+
+async function onCompactWiretapNow(id) {
+    pendingDeleteId = null;
+    setWiretapsStatus('Compacting…');
+    try {
+        const reclaimed = await CompactWiretapNow(id);
+        setWiretapsStatus(reclaimed > 0 ? `Reclaimed ${formatBytes(reclaimed)}.` : 'Nothing to reclaim.');
+    } catch (err) {
+        setWiretapsStatus(`Compact failed: ${err}`);
     }
 }
 

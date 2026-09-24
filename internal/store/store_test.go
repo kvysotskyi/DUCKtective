@@ -242,6 +242,45 @@ func TestUpdateWiretapAddsColumn(t *testing.T) {
 	}
 }
 
+func TestCompactWiretapPreservesRowsAndStaysWritable(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w6", DefaultFields())
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	cutoff := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	if _, err := db.DeleteOlderThan(ctx, w, cutoff); err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+
+	if err := db.CompactWiretap(ctx, w); err != nil {
+		t.Fatalf("CompactWiretap: %v", err)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after compact: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Fatalf("rows after compact = %d, want 3 (the survivors of DeleteOlderThan)", len(res.Rows))
+	}
+
+	// The renamed table must still accept new Appender inserts, not just SELECTs.
+	line := `{"time":"2024-03-01T00:00:00Z","level":"INFO","msg":"after compact"}` + "\n"
+	if _, err := db.LoadFile(ctx, w, "g.jsonl", strings.NewReader(line)); err != nil {
+		t.Fatalf("LoadFile after compact: %v", err)
+	}
+	res, err = db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after post-compact LoadFile: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Fatalf("rows after post-compact LoadFile = %d, want 4", len(res.Rows))
+	}
+}
+
 func TestDeleteWiretapDropsTable(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
