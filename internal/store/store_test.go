@@ -539,9 +539,9 @@ func randomLines(n int, payloadBytes int) string {
 // cap with "could not allocate block ... Failed to create checkpoint", which invalidates the whole
 // instance. Chunked commits and rowid-batched copies must keep every transaction under even a tiny cap.
 func TestLoadAndCompactStayCheckpointSafeUnderTinyMemoryLimit(t *testing.T) {
-	prev := wiretapMemoryLimit
-	wiretapMemoryLimit = "20MB"
-	t.Cleanup(func() { wiretapMemoryLimit = prev })
+	prev := wiretapMemoryLimitBytes
+	wiretapMemoryLimitBytes = 20 << 20
+	t.Cleanup(func() { wiretapMemoryLimitBytes = prev })
 
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -657,6 +657,70 @@ func TestPrepareManyThenCommitInOrder(t *testing.T) {
 	}
 	if len(res.Rows) != 12 {
 		t.Errorf("total rows = %d, want 12", len(res.Rows))
+	}
+}
+
+// lineStream streams n realistic NDJSON lines without materialising them, so multi-million-row tests
+// don't need gigabytes of test memory.
+type lineStream struct {
+	n, i int
+	buf  []byte
+	rng  *rand.Rand
+	base time.Time
+}
+
+func newLineStream(n int) *lineStream {
+	return &lineStream{n: n, rng: rand.New(rand.NewSource(7)), base: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)}
+}
+
+func (s *lineStream) Read(p []byte) (int, error) {
+	for len(s.buf) < len(p) && s.i < s.n {
+		var trace [16]byte
+		s.rng.Read(trace[:])
+		ts := s.base.Add(time.Duration(s.i) * 5 * time.Millisecond)
+		acc := fmt.Sprintf("ACC%07d", s.rng.Intn(400000))
+		s.buf = fmt.Appendf(s.buf, `{"time":"%s","level":"INFO","msg":"processed study for %s in %dms (%x)",":topic":"gateway","accession":"%s","study_uid":"1.2.840.%d","trace":"%x"}`+"\n",
+			ts.Format(time.RFC3339Nano), acc, s.rng.Intn(5000), trace[:8], acc, s.rng.Intn(9999999), trace)
+		s.i++
+	}
+	if len(s.buf) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, s.buf)
+	s.buf = s.buf[n:]
+	return n, nil
+}
+
+// Opt-in (DUCKTECTIVE_BIG_TESTS=1): loads a few million realistic rows under the production cap and
+// compacts them, printing timings. Compaction cost must stay flat per batch — rowid batching visited
+// the whole table per batch and blew the cap on a 9.6GB wiretap.
+func TestCompactLargeTableUnderCap(t *testing.T) {
+	if os.Getenv("DUCKTECTIVE_BIG_TESTS") == "" {
+		t.Skip("set DUCKTECTIVE_BIG_TESTS=1 to run")
+	}
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-big", DefaultFields())
+
+	const n = 3_000_000
+	start := time.Now()
+	result, err := db.LoadFile(ctx, w, "big.jsonl", newLineStream(n))
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	loadDur := time.Since(start)
+	before := db.wiretapSize(w.ID)
+	t.Logf("loaded %d rows (%d MB on disk) in %s", result.RowsInserted, before>>20, loadDur.Round(time.Millisecond))
+
+	start = time.Now()
+	if _, err := db.CompactWiretap(ctx, w); err != nil {
+		t.Fatalf("CompactWiretap under %d MB cap: %v", wiretapMemoryLimitBytes>>20, err)
+	}
+	t.Logf("compacted %d MB in %s (cap %d MB)", before>>20, time.Since(start).Round(time.Millisecond), wiretapMemoryLimitBytes>>20)
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil || len(res.Rows) != PageSize {
+		t.Fatalf("Search after compact: rows=%d err=%v", len(res.Rows), err)
 	}
 }
 

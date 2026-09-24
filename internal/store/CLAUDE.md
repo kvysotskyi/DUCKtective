@@ -158,8 +158,8 @@ macOS to swap them out. Three things bound this, in order of impact:
 
 1. Every DuckDB instance is opened with `?memory_limit=` in the DSN —
    go-duckdb forwards DSN query params to `duckdb_set_config`. Wiretap
-   files get `wiretapMemoryLimit` (**100MB**); the catalog gets
-   `catalogMemoryLimit` (512MB, only so the one-time legacy migration that
+   files get `wiretapMemoryLimitBytes` (**100MB**); the catalog gets
+   `catalogMemoryLimitBytes` (512MB, only so the one-time legacy migration that
    copies tables through it isn't starved — the catalog itself holds one
    tiny table and never approaches it). DuckDB spills to `<file>.tmp` when
    an operator needs more.
@@ -167,9 +167,12 @@ macOS to swap them out. Three things bound this, in order of impact:
    **The cap's hard floor is the largest single transaction**, because a
    checkpoint can't spill: it holds every dirty row it's writing. That is
    why `LoadFile` commits per 10K-line chunk, `copyWiretapTo` copies in
-   `copyBatchRows` (20K) rowid batches with a `CHECKPOINT dest` after each
-   (a 100K batch without it OOM'd on the *second* batch at a 20MB cap —
-   batch-one's dirty blocks were still pinned), and every wiretap instance opens
+   **time-range** batches sized to the cap (`copyBatchRows`: ~2KB of
+   headroom per row, so ~51K rows at 100MB, ~10K at 20MB) with a
+   `CHECKPOINT dest` after each (a 100K batch without the checkpoint OOM'd
+   on the *second* batch at a 20MB cap — batch-one's dirty blocks were
+   still pinned; a fixed 50K batch OOM'd at 20MB too), and every wiretap
+   instance opens
    with `preserve_insertion_order=false` (bulk copies run parallel and
    lean; safe because every query orders explicitly).
    `TestLoadAndCompactStayCheckpointSafeUnderTinyMemoryLimit` loads 200K
@@ -224,10 +227,23 @@ write them, not clustered by `time`), so in practice almost no block is ever
 explicit `VACUUM` reclaims the space. `CompactWiretap` sidesteps this by
 copying the live rows into a **brand-new file** (`ATTACH`, clone the
 schema with `CREATE TABLE … AS SELECT * … LIMIT 0`, then `INSERT … SELECT`
-in `copyBatchRows` rowid batches, checkpointing `dest` after each, so no
-transaction outgrows the memory cap — the same `copyWiretapTo` the legacy
-migration uses; DuckDB fills the tail row group before opening a new one,
-so small batches don't fragment the result), then
+in batches of ≤ `copyBatchRows(cap)` rows, checkpointing `dest` after each,
+so no transaction outgrows the memory cap — the same `copyWiretapTo` the
+legacy migration uses; DuckDB fills the tail row group before opening a
+new one, so small batches don't fragment the result), then swapping the
+file in. **Batches are time ranges, never rowid ranges.** `copyRange`
+bisects `[min(time), max(time)]` until a span holds ≤ the cap-derived
+batch size — and bisects again if DuckDB's non-fatal `Out of Memory` says
+a batch was still too big — and rows with no parsable `time` get the same
+treatment keyed on `ingested_at`.
+Rowid batching was tried first and measured: DuckDB does *not* prune row
+groups on `rowid`, so every 20K-row batch visited the whole table — cost
+grew with table size (114ms on 0.5GB, 489ms on 1.25GB), and on the real
+9.6GB wiretap the very first batch OOM'd at the 100MB cap. `time` and
+`ingested_at` are zone-mapped, so a span only touches its own row groups
+and each batch costs the same regardless of table size
+(`TestCompactLargeTableUnderCap`, opt-in via `DUCKTECTIVE_BIG_TESTS=1`,
+measures this on a multi-million-row table), then
 swapping it in under the wiretap's write lock: close the instance, move
 the fresh file over the old one, reopen. A new file is exactly the live
 data by construction. **Don't go back to an in-place rewrite** (`CREATE

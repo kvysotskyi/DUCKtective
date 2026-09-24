@@ -18,11 +18,11 @@ import (
 	"ducktective/internal/appdir"
 )
 
-// wiretapMemoryLimit caps each wiretap's own DuckDB instance (block caching is left to the OS page cache, see CLAUDE.md); a var so tests can shrink it to prove every transaction still checkpoints under a tiny cap.
-var wiretapMemoryLimit = "100MB"
+// wiretapMemoryLimitBytes caps each wiretap's own DuckDB instance (block caching is left to the OS page cache, see CLAUDE.md); a var so tests can shrink it to prove every transaction still checkpoints under a tiny cap.
+var wiretapMemoryLimitBytes int64 = 100 << 20
 
-// catalogMemoryLimit is higher only because a one-time legacy migration copies tables through the catalog instance.
-const catalogMemoryLimit = "512MB"
+// catalogMemoryLimitBytes is higher only because a one-time legacy migration copies tables through the catalog instance.
+const catalogMemoryLimitBytes int64 = 512 << 20
 
 const (
 	catalogFileName = "ducktective.duckdb"
@@ -104,7 +104,7 @@ func OpenAt(catalogPath string) (*DB, error) {
 }
 
 func (db *DB) openCatalog() error {
-	c, err := openDuckDB(db.catalogPath, catalogMemoryLimit)
+	c, err := openDuckDB(db.catalogPath, catalogMemoryLimitBytes)
 	if err != nil {
 		return err
 	}
@@ -117,8 +117,8 @@ func (db *DB) openCatalog() error {
 }
 
 // openDuckDB opens one instance; preserve_insertion_order=false lets bulk copies run parallel and lean, and is safe because every query orders explicitly.
-func openDuckDB(path, memoryLimit string) (*sql.DB, error) {
-	d, err := sql.Open("duckdb", path+"?memory_limit="+memoryLimit+"&preserve_insertion_order=false")
+func openDuckDB(path string, memoryLimitBytes int64) (*sql.DB, error) {
+	d, err := sql.Open("duckdb", fmt.Sprintf("%s?memory_limit=%dKB&preserve_insertion_order=false", path, memoryLimitBytes>>10))
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +218,7 @@ func (db *DB) openHandle(w Wiretap, create bool) (*wiretapHandle, error) {
 			return nil, fmt.Errorf("wiretap %q has no database file at %s: %w", w.ID, path, err)
 		}
 	}
-	d, err := openDuckDB(path, wiretapMemoryLimit)
+	d, err := openDuckDB(path, wiretapMemoryLimitBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -68,7 +68,7 @@ func (db *DB) exportLegacyWiretap(ctx context.Context, w Wiretap) error {
 		return err
 	}
 	path := db.wiretapPath(w.ID)
-	if err := copyWiretapTo(ctx, db.catalog, w, path); err != nil {
+	if err := copyWiretapTo(ctx, db.catalog, w, path, catalogMemoryLimitBytes); err != nil {
 		return err
 	}
 	log.Printf("[migrate] %s: %d row(s) -> %s in %s", w.Name, rows, path, time.Since(start))
@@ -85,7 +85,7 @@ func (db *DB) rebuildCatalog(ctx context.Context) error {
 	newPath := db.newCatalogPath()
 	os.Remove(newPath)
 	os.Remove(newPath + ".wal")
-	fresh, err := openDuckDB(newPath, catalogMemoryLimit)
+	fresh, err := openDuckDB(newPath, catalogMemoryLimitBytes)
 	if err != nil {
 		return err
 	}
