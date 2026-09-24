@@ -2,12 +2,12 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"runtime"
+	"runtime/debug"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -185,7 +185,7 @@ func (a *App) ListObjectsForWiretap(wiretapID, prefixOverride string) ([]FileEnt
 
 	entries := make([]FileEntry, len(objs))
 	for i, o := range objs {
-		loaded, _ := a.db.IsFileLoaded(a.ctx, w.ID, o.Name)
+		loaded, _ := a.db.IsFileLoaded(a.ctx, w, o.Name)
 		entries[i] = FileEntry{ObjectInfo: o, Loaded: loaded}
 	}
 	return entries, nil
@@ -212,17 +212,15 @@ var maxConcurrentDownloads = runtime.NumCPU() + 2
 
 type downloadResult struct {
 	name string
-	data []byte
+	body io.ReadCloser
 	err  error
 	dur  time.Duration
 }
 
-// downloadAll fetches every named object with bounded concurrency, streaming results back as each
-// download finishes rather than waiting for the whole batch — so the (sequential, by design — see
-// LoadFile) DB insert for an earlier file can run while later downloads are still in flight.
+// downloadAll opens every named object with bounded concurrency and streams each straight to the consumer as a live io.ReadCloser — callers must Close each result's body (see internal/app/CLAUDE.md).
 func downloadAll(ctx context.Context, src source.Source, names []string) <-chan downloadResult {
 	batchStart := time.Now()
-	results := make(chan downloadResult, len(names))
+	results := make(chan downloadResult, maxConcurrentDownloads)
 	go func() {
 		defer close(results)
 		defer func() {
@@ -234,19 +232,22 @@ func downloadAll(ctx context.Context, src source.Source, names []string) <-chan 
 			g.Go(func() error {
 				start := time.Now()
 				r, err := src.OpenObject(ctx, name)
-				if err != nil {
-					results <- downloadResult{name: name, err: err, dur: time.Since(start)}
-					return nil
-				}
-				data, err := io.ReadAll(r)
-				r.Close()
-				results <- downloadResult{name: name, data: data, err: err, dur: time.Since(start)}
+				results <- downloadResult{name: name, body: r, err: err, dur: time.Since(start)}
 				return nil
 			})
 		}
 		g.Wait()
 	}()
 	return results
+}
+
+// freeMemoryEveryNFiles bounds how long a large backlog can inflate RSS before freeOSMemory gets a
+// chance to run — see internal/app/CLAUDE.md.
+const freeMemoryEveryNFiles = 20
+
+// freeOSMemory forces Go to hand freed heap pages back to the OS immediately instead of via its own lazy scavenger — see internal/app/CLAUDE.md.
+func freeOSMemory() {
+	debug.FreeOSMemory()
 }
 
 func (a *App) emitSyncProgress(wiretapID string, done, total int, current string) {
@@ -276,7 +277,7 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 	summaries := make(map[string]LoadSummary, len(names))
 	var toDownload []string
 	for _, name := range names {
-		loaded, err := a.db.IsFileLoaded(a.ctx, w.ID, name)
+		loaded, err := a.db.IsFileLoaded(a.ctx, w, name)
 		if err != nil {
 			summaries[name] = LoadSummary{Name: name, Error: err.Error()}
 			continue
@@ -288,22 +289,13 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 		toDownload = append(toDownload, name)
 	}
 
-	done := 0
-	for res := range downloadAll(a.ctx, src, toDownload) {
-		done++
-		a.emitSyncProgress(w.ID, done, len(toDownload), res.name)
-		log.Printf("[download] %s: %s", res.name, res.dur)
-		if res.err != nil {
-			summaries[res.name] = LoadSummary{Name: res.name, Error: res.err.Error()}
-			continue
-		}
-		result, err := a.db.LoadFile(a.ctx, w, res.name, bytes.NewReader(res.data))
+	a.loadPipeline(a.ctx, w, src, toDownload, func(name string, result store.IngestResult, err error) {
 		if err != nil {
-			summaries[res.name] = LoadSummary{Name: res.name, Error: err.Error()}
-			continue
+			summaries[name] = LoadSummary{Name: name, Error: err.Error()}
+			return
 		}
-		summaries[res.name] = LoadSummary{Name: res.name, RowsInserted: result.RowsInserted, LinesSkipped: result.LinesSkipped}
-	}
+		summaries[name] = LoadSummary{Name: name, RowsInserted: result.RowsInserted, LinesSkipped: result.LinesSkipped}
+	})
 	log.Printf("[LoadFilesNow] %d file(s) (%d already loaded) in %s", len(names), len(names)-len(toDownload), time.Since(batchStart))
 
 	ordered := make([]LoadSummary, len(names))
@@ -339,7 +331,7 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 
 	var toLoad []string
 	for _, o := range objs {
-		alreadyLoaded, err := a.db.IsFileLoaded(ctx, w.ID, o.Name)
+		alreadyLoaded, err := a.db.IsFileLoaded(ctx, w, o.Name)
 		if err != nil {
 			return 0, err
 		}
@@ -353,24 +345,74 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 
 	batchStart := time.Now()
 	loaded := 0
-	done := 0
-	for res := range downloadAll(ctx, src, toLoad) {
-		done++
-		a.emitSyncProgress(w.ID, done, len(toLoad), res.name)
-		log.Printf("[download] %s: %s", res.name, res.dur)
-		if res.err != nil {
-			continue // best-effort — the scheduler/manual sync will retry it next tick
-		}
-		if _, err := a.db.LoadFile(ctx, w, res.name, bytes.NewReader(res.data)); err == nil {
+	a.loadPipeline(ctx, w, src, toLoad, func(_ string, _ store.IngestResult, err error) {
+		if err == nil {
 			loaded++
 		}
-	}
+	})
 	log.Printf("[autoLoadNewFiles] %s: %d file(s) in %s", w.Name, len(toLoad), time.Since(batchStart))
 	return loaded, nil
 }
 
-// RunRetentionNow applies the wiretap's configured retention period immediately.
-func (a *App) RunRetentionNow(wiretapID string) (int64, error) {
+// maxInFlightFiles bounds how many files stream and parse ahead of the single database writer; memory ≈ this × (pendingChunkDepth+1) parsed chunks, independent of file count or size.
+const maxInFlightFiles = 4
+
+// loadPipeline overlaps download+parse of up to maxInFlightFiles files with the (serialized, in-order) database commit of the files ahead of them, reporting each file's outcome to onResult.
+func (a *App) loadPipeline(ctx context.Context, w store.Wiretap, src source.Source, names []string, onResult func(name string, result store.IngestResult, err error)) {
+	type inflight struct {
+		res     downloadResult
+		pending *store.PendingFile
+	}
+	done := 0
+	finish := func(name string, result store.IngestResult, err error) {
+		done++
+		a.emitSyncProgress(w.ID, done, len(names), name)
+		onResult(name, result, err)
+		if done%freeMemoryEveryNFiles == 0 {
+			freeOSMemory()
+		}
+	}
+	commit := func(f inflight) {
+		result, err := a.db.CommitFile(ctx, f.pending)
+		f.res.body.Close()
+		finish(f.res.name, result, err)
+	}
+
+	var queue []inflight
+	for res := range downloadAll(ctx, src, names) {
+		log.Printf("[download] %s: opened in %s", res.name, res.dur)
+		if res.err != nil {
+			finish(res.name, store.IngestResult{}, res.err)
+			continue
+		}
+		queue = append(queue, inflight{res: res, pending: a.db.PrepareFile(ctx, w, res.name, res.body)})
+		if len(queue) == maxInFlightFiles {
+			commit(queue[0])
+			queue = queue[1:]
+		}
+	}
+	for _, f := range queue {
+		commit(f)
+	}
+	if len(names) > 0 {
+		freeOSMemory()
+	}
+}
+
+// RunRetentionNow applies the wiretap's whole retention policy (age, size cap, compaction) immediately.
+func (a *App) RunRetentionNow(wiretapID string) (store.RetentionResult, error) {
+	if a.dbErr != nil {
+		return store.RetentionResult{}, a.dbErr
+	}
+	w, err := a.db.GetWiretap(a.ctx, wiretapID)
+	if err != nil {
+		return store.RetentionResult{}, err
+	}
+	return a.db.ApplyRetention(a.ctx, w, time.Now().UTC())
+}
+
+// CompactWiretapNow rewrites the wiretap's table to reclaim disk space DELETE never returns (see internal/store/CLAUDE.md), reporting bytes its file shrank by.
+func (a *App) CompactWiretapNow(wiretapID string) (int64, error) {
 	if a.dbErr != nil {
 		return 0, a.dbErr
 	}
@@ -378,11 +420,7 @@ func (a *App) RunRetentionNow(wiretapID string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if w.RetentionDays <= 0 {
-		return 0, fmt.Errorf("wiretap has no retention period configured")
-	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -w.RetentionDays)
-	return a.db.DeleteOlderThan(a.ctx, w, cutoff)
+	return a.db.CompactWiretap(a.ctx, w)
 }
 
 func (a *App) Search(wiretapID string, filters store.Filters) (store.SearchResult, error) {
@@ -407,7 +445,7 @@ func (a *App) DistinctLevels(wiretapID string) ([]string, error) {
 	return a.db.DistinctLevels(a.ctx, w)
 }
 
-func (a *App) GetRawLine(wiretapID, fileHash string) (string, error) {
+func (a *App) GetRawLine(wiretapID, sourceFile string, sourceLine int) (string, error) {
 	if a.dbErr != nil {
 		return "", a.dbErr
 	}
@@ -415,5 +453,5 @@ func (a *App) GetRawLine(wiretapID, fileHash string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return a.db.RawLine(a.ctx, w, fileHash)
+	return a.db.RawLine(a.ctx, w, sourceFile, sourceLine)
 }

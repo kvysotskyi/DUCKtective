@@ -11,12 +11,21 @@ list; the first key present with the right-shaped value wins, so one
 column can absorb multiple producers' spellings of the same concept
 (e.g. `"time"` and `":time"`).
 
-`Line(raw, fields) (values, ts, ok)` — `ok` is `false` **only** when the
+`Line(raw, fields, values) (ts, ok)` — `ok` is `false` **only** when the
 line isn't valid JSON at all. A missing or malformed *individual* field
 (even one marked `Required` in the Wiretap form) never drops the line —
-it just leaves that column unset (`nil`/`NULL` downstream). `Required` is
+it just leaves that field's slot `nil` (`NULL` downstream). `Required` is
 purely a UI/form-validation concept enforced at Wiretap-creation time,
 not at parse/ingest time — nothing here or in `store.LoadFile` checks it.
+
+`values` is caller-owned and positional, aligned 1:1 with `fields` —
+`values[i]` is `fields[i]`'s value (`nil` if absent), not a map. This
+exists so `internal/store` can pool and reuse these slices across lines
+instead of allocating a fresh `map[string]string` per line (see
+[internal/store/CLAUDE.md](../store/CLAUDE.md)); `Line` itself has no
+pooling logic, it just writes into whatever slice it's given, sized
+`len(fields)` by the caller. `values` is left untouched when `ok` is
+`false`.
 
 ## ⚠️ Timezone handling — do not "fix" this
 

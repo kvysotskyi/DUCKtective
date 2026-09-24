@@ -194,7 +194,6 @@ export namespace store {
 	    }
 	}
 	export class LogRow {
-	    fileHash: string;
 	    // Go type: time
 	    time?: any;
 	    level?: string;
@@ -208,7 +207,6 @@ export namespace store {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.fileHash = source["fileHash"];
 	        this.time = this.convertValues(source["time"], null);
 	        this.level = source["level"];
 	        this.fields = source["fields"];
@@ -233,6 +231,24 @@ export namespace store {
 		    }
 		    return a;
 		}
+	}
+	export class RetentionResult {
+	    rowsDeleted: number;
+	    compacted: boolean;
+	    bytesReclaimed: number;
+	    sizeBytes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new RetentionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rowsDeleted = source["rowsDeleted"];
+	        this.compacted = source["compacted"];
+	        this.bytesReclaimed = source["bytesReclaimed"];
+	        this.sizeBytes = source["sizeBytes"];
+	    }
 	}
 	export class SearchResult {
 	    rows: LogRow[];
@@ -277,10 +293,13 @@ export namespace store {
 	    retentionDays: number;
 	    autoLoadEnabled: boolean;
 	    pollIntervalMinutes: number;
+	    loadDaysBack: number;
+	    maxSizeMB: number;
 	    // Go type: time
 	    createdAt: any;
 	    // Go type: time
 	    lastPolledAt?: any;
+	    sizeBytes: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Wiretap(source);
@@ -298,8 +317,11 @@ export namespace store {
 	        this.retentionDays = source["retentionDays"];
 	        this.autoLoadEnabled = source["autoLoadEnabled"];
 	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.loadDaysBack = source["loadDaysBack"];
+	        this.maxSizeMB = source["maxSizeMB"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	        this.lastPolledAt = this.convertValues(source["lastPolledAt"], null);
+	        this.sizeBytes = source["sizeBytes"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -329,6 +351,8 @@ export namespace store {
 	    retentionDays: number;
 	    autoLoadEnabled: boolean;
 	    pollIntervalMinutes: number;
+	    loadDaysBack: number;
+	    maxSizeMB: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new WiretapInput(source);
@@ -344,6 +368,8 @@ export namespace store {
 	        this.retentionDays = source["retentionDays"];
 	        this.autoLoadEnabled = source["autoLoadEnabled"];
 	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.loadDaysBack = source["loadDaysBack"];
+	        this.maxSizeMB = source["maxSizeMB"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

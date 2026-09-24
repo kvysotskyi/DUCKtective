@@ -18,26 +18,26 @@ type Field struct {
 // TimeColumn is the fixed column name for the one field parsed as a timestamp rather than a string.
 const TimeColumn = "time"
 
-// Line parses one NDJSON line against fields. ok is false only when the line isn't valid JSON at all —
-// a missing or malformed individual field never drops the line, it just leaves that column unset.
-// ts is non-nil only when the "time" field (Column == TimeColumn) resolved to a parsable timestamp.
-func Line(raw string, fields []Field) (values map[string]string, ts *time.Time, ok bool) {
+// Line parses one NDJSON line against fields, filling values[i] (nil if absent) for fields[i] — the
+// caller owns and can reuse/pool values, sized to len(fields); it is untouched when ok is false. ok is
+// false only when the line isn't valid JSON at all — a missing or malformed individual field never
+// drops the line, it just leaves that column's slot nil. ts is non-nil only when the "time" field
+// (Column == TimeColumn) resolved to a parsable timestamp.
+func Line(raw string, fields []Field, values []*string) (ts *time.Time, ok bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
-		return nil, nil, false
+		return nil, false
 	}
 
-	values = make(map[string]string, len(fields))
-	for _, f := range fields {
+	for i, f := range fields {
 		if f.Column == TimeColumn {
+			values[i] = nil
 			ts = firstTimestamp(obj, f.JSONKeys)
 			continue
 		}
-		if s := firstString(obj, f.JSONKeys); s != nil {
-			values[f.Column] = *s
-		}
+		values[i] = firstString(obj, f.JSONKeys)
 	}
-	return values, ts, true
+	return ts, true
 }
 
 func firstString(obj map[string]json.RawMessage, keys []string) *string {

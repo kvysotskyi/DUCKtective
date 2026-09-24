@@ -15,7 +15,7 @@ func TestLinePreservesSourceWallClockOffset(t *testing.T) {
 		{Column: "msg", JSONKeys: []string{"msg"}, Required: true},
 	}
 
-	_, ts, ok := Line(raw, fields)
+	ts, ok := Line(raw, fields, make([]*string, len(fields)))
 	if !ok {
 		t.Fatal("Line() returned ok=false for valid JSON")
 	}
@@ -38,7 +38,7 @@ func TestLineEpochIsUTC(t *testing.T) {
 	raw := `{"time":1704240000,"level":"INFO","msg":"hi"}`
 	fields := DefaultTestFields()
 
-	_, ts, ok := Line(raw, fields)
+	ts, ok := Line(raw, fields, make([]*string, len(fields)))
 	if !ok {
 		t.Fatal("Line() returned ok=false for valid JSON")
 	}

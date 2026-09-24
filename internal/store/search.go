@@ -13,9 +13,9 @@ const PageSize = 100
 
 // Filters combine with AND; every field is optional and an empty Filters returns everything (paged).
 type Filters struct {
-	TimeFrom *time.Time        `json:"timeFrom"`
-	TimeTo   *time.Time        `json:"timeTo"`
-	Level    string            `json:"level"`
+	TimeFrom *time.Time `json:"timeFrom"`
+	TimeTo   *time.Time `json:"timeTo"`
+	Level    string     `json:"level"`
 	// Fields covers every non-time-non-level column (msg included) — column name -> substring match.
 	Fields map[string]string `json:"fields"`
 	// Text matches anywhere in the original raw JSON line — covers fields that don't have their own
@@ -25,7 +25,6 @@ type Filters struct {
 }
 
 type LogRow struct {
-	FileHash   string            `json:"fileHash"`
 	Time       *time.Time        `json:"time"`
 	Level      *string           `json:"level"`
 	Fields     map[string]string `json:"fields"`
@@ -49,8 +48,9 @@ func otherColumns(w Wiretap) []string {
 	return cols
 }
 
-// Search runs one parameterized query built from whichever filters are set — no SQL ever reaches the caller.
-func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, error) {
+// Search runs one parameterized query built from whichever filters are set — no SQL ever reaches the caller; substring filters use contains(), not LIKE, so `_`/`%` in user input stay literal and the scan always takes DuckDB's fast path (LIKE only gets rewritten to contains when the pattern has no `_`; measured 160 → 49ms).
+func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResult, retErr error) {
+	defer func() { db.heal(w.ID, retErr) }()
 	var where []string
 	var args []any
 
@@ -75,17 +75,17 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 		if val == "" || !known[col] {
 			continue
 		}
-		where = append(where, `"`+col+`" LIKE ?`)
-		args = append(args, "%"+val+"%")
+		where = append(where, `contains("`+col+`", ?)`)
+		args = append(args, val)
 	}
 
 	if f.Text != "" {
-		where = append(where, `raw LIKE ?`)
-		args = append(args, "%"+f.Text+"%")
+		where = append(where, `contains(raw, ?)`)
+		args = append(args, f.Text)
 	}
 
 	others := otherColumns(w)
-	selectCols := []string{"file_hash", `"time"`, `"level"`}
+	selectCols := []string{`"time"`, `"level"`}
 	for _, c := range others {
 		selectCols = append(selectCols, `"`+c+`"`)
 	}
@@ -101,7 +101,13 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 	}
 	query += fmt.Sprintf(` ORDER BY "time" DESC LIMIT %d OFFSET %d`, PageSize+1, offset)
 
-	rows, err := db.sql.QueryContext(ctx, query, args...)
+	h, err := db.handle(w)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	h.lockRead()
+	defer h.unlockRead()
+	rows, err := h.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -109,13 +115,12 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 
 	var result SearchResult
 	for rows.Next() {
-		var fileHash string
 		var ts *time.Time
 		var level *string
 		otherVals := make([]*string, len(others))
 
 		dest := make([]any, 0, len(selectCols))
-		dest = append(dest, &fileHash, &ts, &level)
+		dest = append(dest, &ts, &level)
 		for i := range otherVals {
 			dest = append(dest, &otherVals[i])
 		}
@@ -128,8 +133,8 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 		}
 
 		row := LogRow{
-			FileHash: fileHash, Time: ts, Level: level,
-			Fields: make(map[string]string, len(others)),
+			Time: ts, Level: level,
+			Fields:     make(map[string]string, len(others)),
 			SourceFile: sourceFile, SourceLine: sourceLine,
 		}
 		for i, c := range others {
@@ -151,8 +156,15 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 }
 
 // DistinctLevels feeds the level filter's dropdown from values already loaded for this wiretap.
-func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
-	rows, err := db.sql.QueryContext(ctx,
+func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) (levels []string, retErr error) {
+	h, err := db.handle(w)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { db.heal(w.ID, retErr) }()
+	h.lockRead()
+	defer h.unlockRead()
+	rows, err := h.sql.QueryContext(ctx,
 		`SELECT DISTINCT "level" FROM "`+w.TableName+`" WHERE "level" IS NOT NULL ORDER BY "level"`)
 	if err != nil {
 		return nil, err
@@ -170,9 +182,18 @@ func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
 	return out, rows.Err()
 }
 
-// RawLine backs the "inspect full line" view.
-func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (string, error) {
+// RawLine backs the "inspect full line" view; a row is identified by where it came from, (source_file, source_line).
+func (db *DB) RawLine(ctx context.Context, w Wiretap, sourceFile string, sourceLine int) (line string, retErr error) {
+	h, err := db.handle(w)
+	if err != nil {
+		return "", err
+	}
+	defer func() { db.heal(w.ID, retErr) }()
+	h.lockRead()
+	defer h.unlockRead()
 	var raw string
-	err := db.sql.QueryRowContext(ctx, `SELECT raw FROM "`+w.TableName+`" WHERE file_hash = ?`, fileHash).Scan(&raw)
+	err = h.sql.QueryRowContext(ctx,
+		`SELECT raw FROM "`+w.TableName+`" WHERE source_file = ? AND source_line = ?`, sourceFile, sourceLine,
+	).Scan(&raw)
 	return raw, err
 }

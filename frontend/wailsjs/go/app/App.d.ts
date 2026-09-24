@@ -8,6 +8,8 @@ import {app} from '../models';
 
 export function CheckAuth():Promise<gcp.AuthStatus>;
 
+export function CompactWiretapNow(arg1:string):Promise<number>;
+
 export function CreateWiretap(arg1:store.WiretapInput):Promise<store.Wiretap>;
 
 export function DefaultFields():Promise<Array<parse.Field>>;
@@ -16,7 +18,7 @@ export function DeleteWiretap(arg1:string):Promise<void>;
 
 export function DistinctLevels(arg1:string):Promise<Array<string>>;
 
-export function GetRawLine(arg1:string,arg2:string):Promise<string>;
+export function GetRawLine(arg1:string,arg2:string,arg3:number):Promise<string>;
 
 export function ListBuckets(arg1:string):Promise<Array<gcs.BucketInfo>>;
 
@@ -28,7 +30,7 @@ export function ListWiretaps():Promise<Array<store.Wiretap>>;
 
 export function LoadFilesNow(arg1:string,arg2:Array<string>):Promise<Array<app.LoadSummary>>;
 
-export function RunRetentionNow(arg1:string):Promise<number>;
+export function RunRetentionNow(arg1:string):Promise<store.RetentionResult>;
 
 export function Search(arg1:string,arg2:store.Filters):Promise<store.SearchResult>;
 
