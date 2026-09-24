@@ -4,7 +4,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -116,9 +118,18 @@ func (db *DB) openCatalog() error {
 	return nil
 }
 
+// storageCompatVersion is the DuckDB storage format every file we create uses (fixed at creation, never upgraded in place); it is what lets textColumnType's ZSTD take effect — an older-format file silently stores TEXT uncompressed, 9× larger (see CLAUDE.md).
+const storageCompatVersion = "v1.4.0"
+
+// zstdStorageVersion is the file-header format number storageCompatVersion writes; files below it predate ZSTD text storage and get re-encoded once (NeedsReencode).
+const zstdStorageVersion = 67
+
+// textColumnType is the DDL type for every TEXT column: ZSTD cut a real wiretap 9× with ~3% ingest cost and no measurable search cost.
+const textColumnType = "TEXT USING COMPRESSION zstd"
+
 // openDuckDB opens one instance; preserve_insertion_order=false lets bulk copies run parallel and lean, and is safe because every query orders explicitly.
 func openDuckDB(path string, memoryLimitBytes int64) (*sql.DB, error) {
-	d, err := sql.Open("duckdb", fmt.Sprintf("%s?memory_limit=%dKB&preserve_insertion_order=false", path, memoryLimitBytes>>10))
+	d, err := sql.Open("duckdb", fmt.Sprintf("%s?memory_limit=%dKB&preserve_insertion_order=false&storage_compatibility_version=%s", path, memoryLimitBytes>>10, storageCompatVersion))
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +317,29 @@ func (db *DB) removeWiretapFiles(id string) error {
 		}
 	}
 	return os.RemoveAll(path + ".tmp")
+}
+
+// storageVersion reads a DuckDB file's format number from its header (8-byte checksum, "DUCK", little-endian uint64).
+func storageVersion(path string) (uint64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	var hdr [20]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return 0, err
+	}
+	if string(hdr[8:12]) != "DUCK" {
+		return 0, fmt.Errorf("%s: not a DuckDB file", path)
+	}
+	return binary.LittleEndian.Uint64(hdr[12:20]), nil
+}
+
+// NeedsReencode reports whether the wiretap's file predates ZSTD text storage (created by DuckDB ≤ 1.1), so one compaction into a fresh file will shrink it several-fold.
+func (db *DB) NeedsReencode(w Wiretap) bool {
+	v, err := storageVersion(db.wiretapPath(w.ID))
+	return err == nil && v < zstdStorageVersion
 }
 
 func fileSize(path string) int64 {

@@ -27,7 +27,35 @@ func (db *DB) CompactWiretap(ctx context.Context, w Wiretap) (reclaimed int64, r
 	return compactLocked(ctx, db, h, w)
 }
 
-// copyWiretapTo copies w's table and dedup rows from src's main schema into a brand-new DuckDB file at destPath via ATTACH, in time-range batches sized to capBytes (see copyRange); the schema is cloned with CREATE TABLE AS SELECT … LIMIT 0 so the load-bearing column order survives.
+// cloneTableDDL builds CREATE TABLE for dest with the source table's exact column order (load-bearing, see wiretap.go) and ZSTD on every TEXT column — CREATE TABLE AS … LIMIT 0 would keep the order but drop the compression.
+func cloneTableDDL(ctx context.Context, src *sql.DB, table, destTable string) (string, error) {
+	rows, err := src.QueryContext(ctx,
+		`SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = current_database() AND table_name = ? ORDER BY column_index`, table)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var name, typ string
+		if err := rows.Scan(&name, &typ); err != nil {
+			return "", err
+		}
+		if typ == "VARCHAR" {
+			typ = textColumnType
+		}
+		cols = append(cols, `"`+name+`" `+typ)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(cols) == 0 {
+		return "", fmt.Errorf("table %q not found", table)
+	}
+	return `CREATE TABLE ` + destTable + ` (` + strings.Join(cols, ", ") + `)`, nil
+}
+
+// copyWiretapTo copies w's table and dedup rows from src's main schema into a brand-new DuckDB file at destPath via ATTACH, in time-range batches sized to capBytes (see copyRange); the new file is in storageCompatVersion format with ZSTD text, so this is also how legacy files get re-encoded.
 func copyWiretapTo(ctx context.Context, src *sql.DB, w Wiretap, destPath string, capBytes int64) error {
 	for _, p := range []string{destPath, destPath + ".wal"} {
 		os.Remove(p)
@@ -47,7 +75,11 @@ func copyWiretapTo(ctx context.Context, src *sql.DB, w Wiretap, destPath string,
 	if err := exec(ingestedFilesDDL("dest.")); err != nil {
 		return err
 	}
-	if err := exec(`CREATE TABLE dest.` + table + ` AS SELECT * FROM main.` + table + ` LIMIT 0`); err != nil {
+	ddl, err := cloneTableDDL(ctx, src, w.TableName, `dest.`+table)
+	if err != nil {
+		return err
+	}
+	if err := exec(ddl); err != nil {
 		return err
 	}
 	maxRows := copyBatchRows(capBytes)

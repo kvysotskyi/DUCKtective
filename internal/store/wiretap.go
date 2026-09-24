@@ -130,7 +130,7 @@ func columnType(column string) string {
 	if column == parse.TimeColumn {
 		return "TIMESTAMP"
 	}
-	return "TEXT"
+	return textColumnType
 }
 
 // CreateWiretap validates the input, records the wiretap in the catalog, and creates its table in its own file.
@@ -218,7 +218,7 @@ func (db *DB) createWiretapTable(ctx context.Context, w Wiretap) error {
 	// (see UpdateWiretap) always appends new columns at the very end of the table, and UpdateWiretap
 	// appends new fields at the end of Wiretap.Fields to match — so field columns must be the last
 	// section of the table for those two "append at the end" behaviors to stay in sync.
-	ddl.WriteString(`" (raw TEXT, source_file TEXT, source_line INTEGER, ingested_at TIMESTAMP`)
+	ddl.WriteString(`" (raw ` + textColumnType + `, source_file ` + textColumnType + `, source_line INTEGER, ingested_at TIMESTAMP`)
 	for _, f := range w.Fields {
 		ddl.WriteString(`, "`)
 		ddl.WriteString(f.Column)

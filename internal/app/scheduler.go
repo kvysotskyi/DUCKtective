@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"log"
 	"time"
+
+	"ducktective/internal/store"
 )
 
 // pollTick is how often the scheduler checks whether any wiretap is due — the actual per-wiretap
@@ -12,13 +15,14 @@ const pollTick = time.Minute
 // scheduler runs auto-load and auto-retention for every enabled wiretap while the app is open. There
 // is no background-when-closed service — this goroutine simply stops when the app does.
 type scheduler struct {
-	app    *App
-	ticker *time.Ticker
-	stopCh chan struct{}
+	app            *App
+	ticker         *time.Ticker
+	stopCh         chan struct{}
+	reencodeFailed map[string]time.Time
 }
 
 func newScheduler(a *App) *scheduler {
-	return &scheduler{app: a}
+	return &scheduler{app: a, reencodeFailed: map[string]time.Time{}}
 }
 
 func (s *scheduler) start(ctx context.Context) {
@@ -56,6 +60,7 @@ func (s *scheduler) tick(ctx context.Context) {
 
 	now := time.Now().UTC()
 	for _, w := range wiretaps {
+		s.reencodeIfLegacy(ctx, w, now)
 		hasRetention := w.RetentionDays > 0 || w.MaxSizeMB > 0
 		if !w.AutoLoadEnabled && !hasRetention {
 			continue
@@ -85,3 +90,18 @@ func (s *scheduler) tick(ctx context.Context) {
 
 // idleHandleTTL is how long a wiretap's DuckDB instance stays open unused before its memory is released.
 const idleHandleTTL = 10 * time.Minute
+
+// reencodeRetryAfter spaces out retries of a failed legacy-format re-encode, which is a multi-minute rewrite on a big wiretap.
+const reencodeRetryAfter = time.Hour
+
+// reencodeIfLegacy rewrites a wiretap file created before ZSTD text storage (DuckDB ≤ 1.1) into the current format once; ~9× smaller on real logs.
+func (s *scheduler) reencodeIfLegacy(ctx context.Context, w store.Wiretap, now time.Time) {
+	if !s.app.db.NeedsReencode(w) || now.Sub(s.reencodeFailed[w.ID]) < reencodeRetryAfter {
+		return
+	}
+	log.Printf("[reencode] %s: legacy storage format, rewriting with ZSTD text compression", w.Name)
+	if _, err := s.app.db.CompactWiretap(ctx, w); err != nil {
+		log.Printf("[reencode] %s failed (retry in %s): %v", w.Name, reencodeRetryAfter, err)
+		s.reencodeFailed[w.ID] = now
+	}
+}

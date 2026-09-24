@@ -131,7 +131,13 @@ for the pattern).
 ## scheduler.go
 
 One `time.Ticker` (`pollTick = 1 minute`) per open app instance, started
-in `Startup`. Each tick, every Wiretap that has *either* `AutoLoadEnabled`
+in `Startup`. Each tick first runs `reencodeIfLegacy` on every wiretap:
+a file still in the pre-ZSTD storage format (written by DuckDB ≤ 1.1,
+`db.NeedsReencode`) is rewritten once via `CompactWiretap` (~2 min for
+10GB, searches keep working; a failure is retried after
+`reencodeRetryAfter`), logged as `[reencode]` — see
+[internal/store/CLAUDE.md](../store/CLAUDE.md#storage-format-v14-files-zstd-text--measured-9-smaller).
+Then every Wiretap that has *either* `AutoLoadEnabled`
 *or* a retention policy (`RetentionDays > 0` or `MaxSizeMB > 0`) and whose
 `PollIntervalMinutes` has elapsed since `LastPolledAt` gets, in order:
 `autoLoadNewFiles` (if auto-load is on), `db.ApplyRetention` (if it has a

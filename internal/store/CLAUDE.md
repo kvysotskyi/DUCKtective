@@ -34,10 +34,35 @@ wiretap's real footprint. **On-disk size is always file + `.wal`**
 checkpoints, so the file alone under-reports (a 20K-row load showed as
 12KB until checkpoint).
 
+## Storage format: v1.4 files, ZSTD text — measured 9× smaller
+
+Every instance opens with `storage_compatibility_version=v1.4.0`
+(`storageCompatVersion`) and every TEXT column is declared
+`TEXT USING COMPRESSION zstd` (`textColumnType`, via `columnType`,
+`createWiretapTable`, the `ALTER` in `UpdateWiretap`, and
+`cloneTableDDL` for compaction copies). Measured on a real 12-hour slice
+of RASLO1 (1.58M rows, DuckDB 1.4.1, 100MB cap): old format 1073MB →
+116MB; full-table `raw LIKE` 65 → 77ms; top-101 search 51 → 60ms;
+Appender ingest 112K → 109K rows/s. `raw` and `msg` had been stored
+*Uncompressed* before (DuckDB's default codecs give up on long unique
+strings), which is why files were ~2× the raw text.
+
+Two facts that shape the code: (1) **a file's format is fixed at
+creation** — the setting is not an in-place upgrade, and (2) in an
+older-format file `USING COMPRESSION zstd` is *silently ignored* (stored
+Uncompressed). So the only way to shrink a file written by DuckDB ≤ 1.1
+is a compaction into a fresh file, and `NeedsReencode` (file-header
+format number < `zstdStorageVersion`, read by `storageVersion`) tells the
+scheduler which wiretaps to rewrite once (`[reencode]`,
+`scheduler.reencodeIfLegacy`). Files in this format need DuckDB ≥ 1.4 to
+open — fine, we ship 1.4.1 (root CLAUDE.md rule 6).
+`TestNewWiretapStoresTextAsZstd` and
+`TestLegacyFormatFileIsReencodedByCompaction` pin both behaviours.
+
 `migrate_legacy.go` handles the pre-split layout (wiretap tables inside
 the catalog): on open, each table is copied into its own file via
-`ATTACH` + `CREATE TABLE … AS SELECT *` (which preserves the load-bearing
-column order below), dedup rows are copied alongside, then a fresh small
+`copyWiretapTo` (which preserves the load-bearing column order below and
+lands in the current storage format), dedup rows are copied alongside, then a fresh small
 catalog is built and swapped in with a crash-safe two-rename sequence
 (`recoverInterruptedCatalogSwap` finishes it if interrupted). The
 original file is kept as `ducktective.legacy.duckdb` — a backup, safe to
@@ -240,8 +265,10 @@ scattered across blocks (rows land wherever `LoadFile`'s Appender happened to
 write them, not clustered by `time`), so in practice almost no block is ever
 100% dead, and neither an automatic checkpoint (runs on `db.Close`) nor an
 explicit `VACUUM` reclaims the space. `CompactWiretap` sidesteps this by
-copying the live rows into a **brand-new file** (`ATTACH`, clone the
-schema with `CREATE TABLE … AS SELECT * … LIMIT 0`, then `INSERT … SELECT`
+copying the live rows into a **brand-new file** (`ATTACH`, rebuild the
+schema with `cloneTableDDL` — same column order from `duckdb_columns()`,
+ZSTD on every TEXT column, which `CREATE TABLE … AS SELECT … LIMIT 0`
+would have dropped — then `INSERT … SELECT`
 in batches of ≤ `copyBatchRows(cap)` rows, checkpointing `dest` after each,
 so no transaction outgrows the memory cap — the same `copyWiretapTo` the
 legacy migration uses; DuckDB fills the tail row group before opening a
@@ -269,6 +296,11 @@ lived in file blocks, every subsequent compaction *grew* the file
 because the new copy landed in fresh blocks and the old copy's blocks were
 never truncated — and a second `CHECKPOINT` did not help. Retention only
 marks rows dead; compacting is what actually reclaims the space.
+Re-checked on DuckDB 1.5: `DELETE` + `CHECKPOINT` still never shrinks the
+file, but the freed blocks *are* reused by later inserts (1.5M rows →
+delete ¾ → re-insert ¼: file stayed at 362MB, `free_blocks` fell as the
+inserts landed), so steady-state retention plateaus at the high-water
+mark rather than growing; compaction is for giving disk back.
 
 Two things learned from watching it run on the real installation: (1) on
 this data DuckDB's own checkpoints *do* reclaim whole dead row groups

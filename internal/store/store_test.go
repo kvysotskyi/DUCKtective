@@ -480,6 +480,9 @@ func TestLegacyLayoutMigrates(t *testing.T) {
 	if _, err := os.Stat(db.WiretapPath(w)); err != nil {
 		t.Fatalf("per-wiretap file missing after migration: %v", err)
 	}
+	if db.NeedsReencode(w) {
+		t.Errorf("migrated wiretap file is not in the ZSTD-capable storage format")
+	}
 	if _, err := os.Stat(db.legacyBackupPath()); err != nil {
 		t.Errorf("legacy backup missing: %v", err)
 	}
@@ -774,5 +777,116 @@ func TestApplyRetentionSizeCapTrimsAndCompacts(t *testing.T) {
 	// Oldest rows go first: the newest line must survive.
 	if remaining.Rows[0].Time == nil || !remaining.Rows[0].Time.Equal(base.Add(19999*time.Second)) {
 		t.Errorf("newest row missing or wrong after trim: %+v", remaining.Rows[0].Time)
+	}
+}
+
+func rawCompressions(t *testing.T, h *wiretapHandle, table string) []string {
+	t.Helper()
+	if _, err := h.sql.Exec(`CHECKPOINT`); err != nil {
+		t.Fatalf("CHECKPOINT: %v", err)
+	}
+	rows, err := h.sql.Query(`SELECT DISTINCT compression FROM pragma_storage_info('` + table + `') WHERE column_name = 'raw' AND segment_type = 'VARCHAR' AND persistent ORDER BY 1`)
+	if err != nil {
+		t.Fatalf("pragma_storage_info: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func TestNewWiretapStoresTextAsZstd(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "z1", DefaultFields())
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", newLineStream(5000)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if v, err := storageVersion(db.WiretapPath(w)); err != nil || v < zstdStorageVersion {
+		t.Fatalf("storage version = %d (err %v), want >= %d", v, err, zstdStorageVersion)
+	}
+	h, err := db.handle(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rawCompressions(t, h, w.TableName); len(got) != 1 || got[0] != "ZSTD" {
+		t.Fatalf("raw column compression = %v, want [ZSTD]", got)
+	}
+}
+
+func TestLegacyFormatFileIsReencodedByCompaction(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "z2", DefaultFields())
+	path := db.WiretapPath(w)
+	if err := db.removeWiretapFiles(w.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain open uses DuckDB's default (pre-ZSTD) storage format, exactly what DuckDB 1.1 wrote.
+	old, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddl := `CREATE TABLE "` + w.TableName + `" (raw TEXT, source_file TEXT, source_line INTEGER, ingested_at TIMESTAMP`
+	for _, f := range w.Fields {
+		ddl += `, "` + f.Column + `" ` + strings.TrimSuffix(columnType(f.Column), " USING COMPRESSION zstd")
+	}
+	for _, s := range []string{
+		ddl + `)`,
+		`INSERT INTO "` + w.TableName + `" SELECT '{"time":"2024-01-01T00:00:00Z","level":"INFO","msg":"' || repeat('m' || i || ' ', 40) || '"}', 'f.jsonl', i, '2024-01-01 00:00:00', '2024-01-01 00:00:00'::TIMESTAMP + INTERVAL (i) SECOND, 'INFO', repeat('m' || i || ' ', 40), 'gateway', 'ACC' || i, '1.2.840.' || i FROM range(1, 30001) r(i)`,
+	} {
+		if _, err := old.Exec(s); err != nil {
+			t.Fatalf("legacy setup: %v", err)
+		}
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !db.NeedsReencode(w) {
+		t.Fatalf("NeedsReencode = false for a default-format file")
+	}
+	h, err := db.handle(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rawCompressions(t, h, w.TableName); len(got) == 1 && got[0] == "ZSTD" {
+		t.Fatalf("legacy-format file unexpectedly already ZSTD: %v", got)
+	}
+	before := db.wiretapSize(w.ID)
+
+	if _, err := db.CompactWiretap(ctx, w); err != nil {
+		t.Fatalf("CompactWiretap: %v", err)
+	}
+	if db.NeedsReencode(w) {
+		t.Errorf("NeedsReencode still true after compaction")
+	}
+	h, err = db.handle(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rawCompressions(t, h, w.TableName); len(got) != 1 || got[0] != "ZSTD" {
+		t.Errorf("raw compression after re-encode = %v, want [ZSTD]", got)
+	}
+	if after := db.wiretapSize(w.ID); after >= before {
+		t.Errorf("re-encoded file is not smaller: %d -> %d bytes", before, after)
+	}
+	var n int
+	if err := h.sql.QueryRow(`SELECT count(*) FROM "` + w.TableName + `"`).Scan(&n); err != nil || n != 30000 {
+		t.Fatalf("rows after re-encode = %d (err %v), want 30000", n, err)
+	}
+	// Column order must survive the rebuild: the Appender binds positionally.
+	if _, err := db.LoadFile(ctx, w, "g.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile after re-encode: %v", err)
+	}
+	res, err := db.Search(ctx, w, Filters{Level: "ERROR"})
+	if err != nil || len(res.Rows) != 1 || res.Rows[0].Fields["msg"] != "second" || res.Rows[0].Fields["topic"] != "gateway" {
+		t.Fatalf("Search after re-encode: rows=%+v err=%v", res.Rows, err)
 	}
 }
