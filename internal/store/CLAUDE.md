@@ -178,6 +178,21 @@ macOS to swap them out. Three things bound this, in order of impact:
    `TestLoadAndCompactStayCheckpointSafeUnderTinyMemoryLimit` loads 200K
    rows and compacts under a deliberate 20MB cap to keep it that way.
 
+   **The cap also needs DuckDB ≥ 1.4 (`go-duckdb/v2`).** Log lines over
+   4KB (stack traces, payload dumps — ~1% of a real gateway wiretap) are
+   stored as compressed "overflow strings" outside the 256KB block. DuckDB
+   1.1 (go-duckdb v1.8.x) decompressed each one into its own
+   `max(256KB, length)` buffer and pinned all of them to the scanned
+   vector, so a 2048-row vector holding 185 long lines cost ~95MB even
+   when the filter kept two 119-byte rows. On a real 9.6GB wiretap that
+   made *every* read touching that vector fail with `Out of Memory` at
+   100MB — the compaction copy (deterministically at the same 2-row time
+   span), `raw LIKE` searches, even `WHERE rowid = ?` — while passing at
+   300MB. DuckDB 1.4.1 runs the same queries under 30MB, and replays a
+   1.1-written WAL correctly (verified: identical row count after the
+   WAL's 1.57M-row DELETE). If a read OOMs at the cap again, check
+   `duckdb_memory()`'s `OVERFLOW_STRINGS` tag before blaming batch sizes.
+
    **What 100MB costs.** `memory_limit` bounds DuckDB's *own* block cache
    and operator memory; it does not bound how much data the OS keeps in its
    page cache on the app's behalf — and macOS caches file pages aggressively,

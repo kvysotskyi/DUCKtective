@@ -26,7 +26,7 @@ beside a small catalog. See [internal/store/CLAUDE.md](internal/store/CLAUDE.md)
 ## Build / dev
 
 - `wails dev` — hot-reload dev server (the user typically already has this running; avoid launching a second one or running `wails generate module` unless asked).
-- `wails build` — packaged app. Requires `build:tags: no_duckdb_arrow` (set in [wails.json](wails.json)) on darwin/arm64, or the go-duckdb Arrow C-Data-Interface symbols fail to link.
+- `wails build` — packaged app. DuckDB comes from `github.com/marcboeker/go-duckdb/v2` (prebuilt static libs; Arrow is opt-in via `-tags duckdb_arrow`, so no build tag is needed). Do not downgrade to go-duckdb v1 / DuckDB 1.1 — see rule 6 below.
 - `go build ./... && go vet ./... && go test ./...` — verify backend changes.
 - `go test -tags integration ./internal/app/... -run TestIntegrationRealBucket -v` — real GCS round-trip against `gs://bgsa-log-bucket/logs/` (needs real ADC creds).
 
@@ -37,3 +37,4 @@ beside a small catalog. See [internal/store/CLAUDE.md](internal/store/CLAUDE.md)
 3. **`wailsruntime.EventsEmit(ctx, ...)` calls `log.Fatalf` (kills the whole process, not just the caller) if `ctx` has no Wails-injected `"events"` value.** Never call an `*App` method that emits progress events (`LoadFilesNow`, `autoLoadNewFiles`) with a bare `context.Background()` — this bit an integration test once; call the lower-level `downloadAll`/`db.LoadFile` directly instead when testing outside a real Wails runtime.
 4. **Bulk log ingest uses DuckDB's native Appender API, not SQL `INSERT`.** A batched multi-row `INSERT ... VALUES (...), (...) ON CONFLICT DO NOTHING` was measured at a flat ~600µs/row regardless of batch size against a real 90K-line file; switching to the Appender brought that to ~110K rows/sec. Dedup is file-level (`IsFileLoaded`), not a per-row constraint. See [internal/store/CLAUDE.md](internal/store/CLAUDE.md).
 5. **Don't run destructive git ops or `wails generate module` unprompted** — the user often has their own `wails dev`/git session running in parallel.
+6. **DuckDB must stay ≥ 1.4 (`go-duckdb/v2`).** DuckDB 1.1 (go-duckdb v1.8.x) decompresses every "overflow string" (any value over 4KB — stack traces, request dumps) into its own ≥256KB buffer pinned to the scanned vector, so one 2048-row vector holding 185 long lines needed ~95MB and OOM'd *every* read of it — search, row fetch, compaction — under the 100MB per-wiretap cap. Measured on a real 9.6GB wiretap; DuckDB 1.4.1 runs the same queries in under 30MB. See [internal/store/CLAUDE.md](internal/store/CLAUDE.md#memory-the-big-consumer-is-duckdbs-heap-not-gos).
