@@ -242,6 +242,10 @@ func downloadAll(ctx context.Context, src source.Source, names []string) <-chan 
 	return results
 }
 
+// freeMemoryEveryNFiles bounds how long a large backlog can inflate RSS before freeOSMemory gets a
+// chance to run — see internal/app/CLAUDE.md.
+const freeMemoryEveryNFiles = 20
+
 // freeOSMemory forces Go to hand freed heap pages back to the OS immediately instead of via its own lazy scavenger — see internal/app/CLAUDE.md.
 func freeOSMemory() {
 	debug.FreeOSMemory()
@@ -302,6 +306,9 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 			continue
 		}
 		summaries[res.name] = LoadSummary{Name: res.name, RowsInserted: result.RowsInserted, LinesSkipped: result.LinesSkipped}
+		if done%freeMemoryEveryNFiles == 0 {
+			freeOSMemory()
+		}
 	}
 	if len(toDownload) > 0 {
 		freeOSMemory()
@@ -367,6 +374,9 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 		res.body.Close()
 		if err == nil {
 			loaded++
+		}
+		if done%freeMemoryEveryNFiles == 0 {
+			freeOSMemory()
 		}
 	}
 	freeOSMemory()

@@ -84,9 +84,14 @@ the OS lazily (`MADV_FREE`), so a burst of large transient allocations
 high-water mark that doesn't come back down on its own, even though the
 memory is logically free and reclaimable under real pressure.
 `LoadFilesNow`/`autoLoadNewFiles` call `freeOSMemory` (`debug.FreeOSMemory`)
-once their batch finishes, forcing Go to hand those pages back
-immediately instead of waiting on its own scavenger — this doesn't change
-peak usage, just how long the OS-visible number stays inflated afterward.
+every `freeMemoryEveryNFiles` files and once more at the end of their
+batch, forcing Go to hand those pages back immediately instead of waiting
+on its own scavenger. Confirmed live: without the periodic call, RSS
+climbed unchecked for the whole duration of a large backlog sync (only
+relieved once the entire batch — potentially thousands of files — had
+finished); the batch-end-only call is too late to matter during a sync
+that's still running. This doesn't change peak usage, just how long the
+OS-visible number stays inflated.
 
 Both paths log `[download]`/`[LoadFilesNow]`/`[autoLoadNewFiles]` timing
 lines via the standard `log` package — check these first if load
