@@ -71,6 +71,7 @@ func (db *DB) migrate() error {
 			rows_ingested INTEGER NOT NULL,
 			PRIMARY KEY (wiretap_id, file_name)
 		)`,
+		`ALTER TABLE _meta_wiretaps ADD COLUMN IF NOT EXISTS load_days_back INTEGER DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := db.sql.Exec(s); err != nil {

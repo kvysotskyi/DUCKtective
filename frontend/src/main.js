@@ -706,6 +706,7 @@ async function openWiretapForm(wiretapId) {
         el('wf-source-type').disabled = true;
         el('wf-prefix').value = w.prefix;
         el('wf-retention').value = w.retentionDays;
+        el('wf-load-days-back').value = w.loadDaysBack;
         el('wf-autoload').checked = w.autoLoadEnabled;
         el('wf-poll-interval').value = w.pollIntervalMinutes;
         formFields = w.fields.map((f) => ({ column: f.column, jsonKeysText: f.jsonKeys.join(', '), required: f.required }));
@@ -723,6 +724,7 @@ async function openWiretapForm(wiretapId) {
         el('wf-source-type').disabled = false;
         el('wf-prefix').value = '';
         el('wf-retention').value = 0;
+        el('wf-load-days-back').value = 0;
         el('wf-autoload').checked = false;
         el('wf-poll-interval').value = 15;
         projectPicker.clear();
@@ -841,6 +843,7 @@ async function onSaveWiretap() {
         prefix: el('wf-prefix').value,
         fields: fieldsFromForm(),
         retentionDays: parseInt(el('wf-retention').value, 10) || 0,
+        loadDaysBack: parseInt(el('wf-load-days-back').value, 10) || 0,
         autoLoadEnabled: el('wf-autoload').checked,
         pollIntervalMinutes: parseInt(el('wf-poll-interval').value, 10) || 15,
     };

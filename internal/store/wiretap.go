@@ -36,8 +36,10 @@ type Wiretap struct {
 	RetentionDays       int              `json:"retentionDays"`
 	AutoLoadEnabled     bool             `json:"autoLoadEnabled"`
 	PollIntervalMinutes int              `json:"pollIntervalMinutes"`
-	CreatedAt           time.Time        `json:"createdAt"`
-	LastPolledAt        *time.Time       `json:"lastPolledAt"`
+	// LoadDaysBack limits loading to files modified in the last N days (0 = no limit).
+	LoadDaysBack int        `json:"loadDaysBack"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	LastPolledAt *time.Time `json:"lastPolledAt"`
 }
 
 // WiretapInput is what the UI submits to create or update a wiretap.
@@ -50,6 +52,7 @@ type WiretapInput struct {
 	RetentionDays       int              `json:"retentionDays"`
 	AutoLoadEnabled     bool             `json:"autoLoadEnabled"`
 	PollIntervalMinutes int              `json:"pollIntervalMinutes"`
+	LoadDaysBack        int              `json:"loadDaysBack"`
 }
 
 // DefaultFields pre-fills a new wiretap with the fields the original fixed schema always extracted.
@@ -157,6 +160,7 @@ func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, erro
 		RetentionDays:       in.RetentionDays,
 		AutoLoadEnabled:     in.AutoLoadEnabled,
 		PollIntervalMinutes: in.PollIntervalMinutes,
+		LoadDaysBack:        in.LoadDaysBack,
 		CreatedAt:           time.Now().UTC(),
 	}
 	if w.PollIntervalMinutes <= 0 {
@@ -200,10 +204,10 @@ func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, erro
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO _meta_wiretaps (
 			id, name, source_type, gcs_config_json, prefix, table_name, fields_json,
-			retention_days, auto_load_enabled, poll_interval_minutes, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			retention_days, auto_load_enabled, poll_interval_minutes, load_days_back, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.Name, w.SourceType, string(gcsJSON), w.Prefix, w.TableName, string(fieldsJSON),
-		w.RetentionDays, w.AutoLoadEnabled, w.PollIntervalMinutes, w.CreatedAt,
+		w.RetentionDays, w.AutoLoadEnabled, w.PollIntervalMinutes, w.LoadDaysBack, w.CreatedAt,
 	)
 	if err != nil {
 		return Wiretap{}, err
@@ -216,7 +220,7 @@ func scanWiretap(row interface{ Scan(...any) error }) (Wiretap, error) {
 	var fieldsJSON, gcsJSON string
 	if err := row.Scan(
 		&w.ID, &w.Name, &w.SourceType, &gcsJSON, &w.Prefix, &w.TableName, &fieldsJSON,
-		&w.RetentionDays, &w.AutoLoadEnabled, &w.PollIntervalMinutes, &w.CreatedAt, &w.LastPolledAt,
+		&w.RetentionDays, &w.AutoLoadEnabled, &w.PollIntervalMinutes, &w.LoadDaysBack, &w.CreatedAt, &w.LastPolledAt,
 	); err != nil {
 		return Wiretap{}, err
 	}
@@ -232,7 +236,7 @@ func scanWiretap(row interface{ Scan(...any) error }) (Wiretap, error) {
 }
 
 const wiretapColumns = `id, name, source_type, gcs_config_json, prefix, table_name, fields_json,
-	retention_days, auto_load_enabled, poll_interval_minutes, created_at, last_polled_at`
+	retention_days, auto_load_enabled, poll_interval_minutes, load_days_back, created_at, last_polled_at`
 
 func (db *DB) ListWiretaps(ctx context.Context) ([]Wiretap, error) {
 	rows, err := db.sql.QueryContext(ctx, `SELECT `+wiretapColumns+` FROM _meta_wiretaps ORDER BY name`)
@@ -322,10 +326,10 @@ func (db *DB) UpdateWiretap(ctx context.Context, id string, in WiretapInput) (Wi
 	_, err = db.sql.ExecContext(ctx, `
 		UPDATE _meta_wiretaps SET
 			name = ?, source_type = ?, gcs_config_json = ?, prefix = ?, fields_json = ?,
-			retention_days = ?, auto_load_enabled = ?, poll_interval_minutes = ?
+			retention_days = ?, auto_load_enabled = ?, poll_interval_minutes = ?, load_days_back = ?
 		WHERE id = ?`,
 		name, sourceType, string(gcsJSON), in.Prefix, string(fieldsJSON),
-		in.RetentionDays, in.AutoLoadEnabled, pollInterval, id,
+		in.RetentionDays, in.AutoLoadEnabled, pollInterval, in.LoadDaysBack, id,
 	)
 	if err != nil {
 		return Wiretap{}, err
