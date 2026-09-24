@@ -48,7 +48,7 @@ func otherColumns(w Wiretap) []string {
 	return cols
 }
 
-// Search runs one parameterized query built from whichever filters are set — no SQL ever reaches the caller.
+// Search runs one parameterized query built from whichever filters are set — no SQL ever reaches the caller; substring filters use contains(), not LIKE, so `_`/`%` in user input stay literal and the scan always takes DuckDB's fast path (LIKE only gets rewritten to contains when the pattern has no `_`; measured 160 → 49ms).
 func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResult, retErr error) {
 	defer func() { db.heal(w.ID, retErr) }()
 	var where []string
@@ -75,13 +75,13 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResul
 		if val == "" || !known[col] {
 			continue
 		}
-		where = append(where, `"`+col+`" LIKE ?`)
-		args = append(args, "%"+val+"%")
+		where = append(where, `contains("`+col+`", ?)`)
+		args = append(args, val)
 	}
 
 	if f.Text != "" {
-		where = append(where, `raw LIKE ?`)
-		args = append(args, "%"+f.Text+"%")
+		where = append(where, `contains(raw, ?)`)
+		args = append(args, f.Text)
 	}
 
 	others := otherColumns(w)

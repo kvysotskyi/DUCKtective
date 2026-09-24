@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
 
 	"ducktective/internal/appdir"
 )
@@ -127,9 +127,13 @@ const zstdStorageVersion = 67
 // textColumnType is the DDL type for every TEXT column: ZSTD cut a real wiretap 9× with ~3% ingest cost and no measurable search cost.
 const textColumnType = "TEXT USING COMPRESSION zstd"
 
+// lateMaterializationRows raises DuckDB's ORDER BY … LIMIT n late-materialization cutoff (default 50) above Search's page of PageSize+1 rows, so it sorts rowids first and fetches the wide columns for the page only — measured 13 → 7ms unfiltered, 70 → 22ms with a needle.
+const lateMaterializationRows = 256
+
 // openDuckDB opens one instance; preserve_insertion_order=false lets bulk copies run parallel and lean, and is safe because every query orders explicitly.
 func openDuckDB(path string, memoryLimitBytes int64) (*sql.DB, error) {
-	d, err := sql.Open("duckdb", fmt.Sprintf("%s?memory_limit=%dKB&preserve_insertion_order=false&storage_compatibility_version=%s", path, memoryLimitBytes>>10, storageCompatVersion))
+	d, err := sql.Open("duckdb", fmt.Sprintf("%s?memory_limit=%dKB&preserve_insertion_order=false&storage_compatibility_version=%s&late_materialization_max_rows=%d",
+		path, memoryLimitBytes>>10, storageCompatVersion, lateMaterializationRows))
 	if err != nil {
 		return nil, err
 	}

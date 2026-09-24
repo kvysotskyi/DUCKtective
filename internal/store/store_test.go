@@ -129,6 +129,13 @@ func TestSearchFiltersAndTimeFallback(t *testing.T) {
 	if len(textRes.Rows) != 1 || textRes.Rows[0].Fields["topic"] != "gateway" {
 		t.Fatalf("free-text filter over raw mismatch: %+v", textRes.Rows)
 	}
+	// `_` and `%` are literal characters in a needle, not LIKE wildcards.
+	if wild, err := db.Search(ctx, w, Filters{Text: "study%uid"}); err != nil || len(wild.Rows) != 0 {
+		t.Fatalf("needle with %% matched as a wildcard: rows=%d err=%v", len(wild.Rows), err)
+	}
+	if lit, err := db.Search(ctx, w, Filters{Text: "study_uid"}); err != nil || len(lit.Rows) != 1 {
+		t.Fatalf("literal needle with _ : rows=%d err=%v", len(lit.Rows), err)
+	}
 
 	levels, err := db.DistinctLevels(ctx, w)
 	if err != nil {
@@ -888,5 +895,27 @@ func TestLegacyFormatFileIsReencodedByCompaction(t *testing.T) {
 	res, err := db.Search(ctx, w, Filters{Level: "ERROR"})
 	if err != nil || len(res.Rows) != 1 || res.Rows[0].Fields["msg"] != "second" || res.Rows[0].Fields["topic"] != "gateway" {
 		t.Fatalf("Search after re-encode: rows=%+v err=%v", res.Rows, err)
+	}
+}
+
+func TestInstanceSettingsApplied(t *testing.T) {
+	db := openTestDB(t)
+	w := createTestWiretap(t, db, "settings", DefaultFields())
+	h, err := db.handle(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"late_materialization_max_rows": "256",
+		"storage_compatibility_version": storageCompatVersion,
+		"preserve_insertion_order":      "false",
+	} {
+		var got string
+		if err := h.sql.QueryRow(`SELECT current_setting(?)`, name).Scan(&got); err != nil {
+			t.Fatalf("current_setting(%s): %v", name, err)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
 	}
 }

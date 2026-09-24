@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	duckdb "github.com/marcboeker/go-duckdb/v2"
+	duckdb "github.com/duckdb/duckdb-go/v2"
 	"golang.org/x/sync/errgroup"
 
 	"ducktective/internal/parse"

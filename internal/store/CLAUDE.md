@@ -122,7 +122,7 @@ spill, it must hold the dirty rows it writes in memory, and a whole
 ~200K-line file committed at once (~150MB dirty) failed its checkpoint
 under the 100MB cap with `could not allocate block of size 256.0 KiB` —
 which is a *fatal* error that invalidates the instance. Rows go through
-`github.com/marcboeker/go-duckdb`'s native **Appender** API — not a
+`github.com/duckdb/duckdb-go/v2`'s native **Appender** API — not a
 batched multi-row SQL `INSERT`. That was tried
 first and measured, against a real ~90K-line file, at a flat ~600µs/row
 *regardless of batch size* (1 row or 1000 rows per statement made no
@@ -352,3 +352,5 @@ go first and the newest survives.
 - Always named-column `SELECT`s, never `SELECT *` — must stay correct regardless of physical column order (see above).
 - `Filters` combine with AND; `PageSize = 100`, paged via `Offset` (frontend does infinite scroll, not page buttons — see `LIMIT PageSize+1 OFFSET offset` / `HasMore`).
 - `otherColumns(w)` = every Wiretap field except `time`/`level` (which get their own typed struct fields on `LogRow`); everything else lands in `LogRow.Fields` (map).
+- Substring filters are `contains(col, ?)`, **not** `LIKE '%…%'`: DuckDB only rewrites LIKE to the fast `contains` path when the pattern has no `_`, and log needles are full of them (`study_uid`: 160 → 49ms on the 10GB clone), and `_`/`%` typed by the user must stay literal (`TestSearchFiltersAndTimeFallback` pins it).
+- Every instance sets `late_materialization_max_rows=256` (`lateMaterializationRows`, DSN) because DuckDB's default cutoff of 50 is below our `LIMIT 101`; with it, `ORDER BY time DESC LIMIT 101` sorts rowids first and fetches the wide columns for the page only (13 → 7ms unfiltered, 70 → 22ms with a common needle). Filter-less Top-N also skips row groups by `time` min/max since 1.5 — another reason to keep `time` the sort key.

@@ -115,7 +115,7 @@ on `window.go` from devtools.
 wails build
 ```
 
-DuckDB is embedded via `github.com/marcboeker/go-duckdb/v2`, which ships
+DuckDB is embedded via `github.com/duckdb/duckdb-go/v2`, which ships
 prebuilt static libraries per platform; no build tags are needed (its Arrow
 bridge is opt-in via `-tags duckdb_arrow`, and this app only uses
 `database/sql`).

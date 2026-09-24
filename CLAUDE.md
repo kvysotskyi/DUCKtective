@@ -26,7 +26,7 @@ beside a small catalog. See [internal/store/CLAUDE.md](internal/store/CLAUDE.md)
 ## Build / dev
 
 - `wails dev` — hot-reload dev server (the user typically already has this running; avoid launching a second one or running `wails generate module` unless asked).
-- `wails build` — packaged app. DuckDB comes from `github.com/marcboeker/go-duckdb/v2` (prebuilt static libs; Arrow is opt-in via `-tags duckdb_arrow`, so no build tag is needed). Do not downgrade to go-duckdb v1 / DuckDB 1.1 — see rule 6 below.
+- `wails build` — packaged app. DuckDB comes from `github.com/duckdb/duckdb-go/v2` (the maintained successor of the archived `marcboeker/go-duckdb`; version `v2.<MAJOR><MINOR><PATCH>.x` encodes the bundled DuckDB, so v2.10505.0 = DuckDB 1.5.5; prebuilt static libs; Arrow is opt-in via `-tags duckdb_arrow`, so no build tag is needed). Do not downgrade below DuckDB 1.4 — see rule 6 below — and never ship 1.5.0 (WAL-corruption regression fixed in 1.5.1).
 - `go build ./... && go vet ./... && go test ./...` — verify backend changes.
 - `go test -tags integration ./internal/app/... -run TestIntegrationRealBucket -v` — real GCS round-trip against `gs://bgsa-log-bucket/logs/` (needs real ADC creds).
 
