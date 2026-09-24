@@ -51,6 +51,20 @@ same data, wrapped in a manual `BEGIN`/`COMMIT` on a single `*sql.Conn`
 `duckdb.NewAppenderFromConn`, so appended rows participate in that
 transaction).
 
+**Parsed field values use a pooled `[]*string`, not a map.** A prior
+version had `parse.Line` allocate a fresh `map[string]string` per line —
+confirmed via `DUCKTECTIVE_PPROF=1` heap profiling as a major allocation
+source (a 150K-line file meant 150K map allocations). `parse.Line` now
+fills a caller-owned `[]*string` positionally aligned to `w.Fields` (`nil`
+= field absent, same as a missing map key; a non-nil pointer can still
+point at `""`, so the absent/empty distinction survives exactly).
+`parseLinesConcurrently`/`LoadFile` get these slices from `valuesPool` (a
+`sync.Pool`, `ingest.go`) and return them once a row's values are copied
+into the Appender's `row []driver.Value` — reusing backing arrays across
+lines within a file and across files, instead of allocating fresh ones
+each time. See `TestLoadFileMissingFieldIsNullNotEmptyString` for the
+nil-vs-empty-string regression this must not reintroduce.
+
 **`LoadFile` does not dedupe.** There is no per-row uniqueness
 constraint on `file_hash` (there used to be a `PRIMARY KEY` +
 `ON CONFLICT DO NOTHING`, which was *also* measured and found to make no

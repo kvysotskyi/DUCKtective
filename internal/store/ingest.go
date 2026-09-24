@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	duckdb "github.com/marcboeker/go-duckdb"
@@ -28,10 +29,28 @@ type IngestResult struct {
 // unmarshal per line), so cores+2 keeps every core busy without wildly oversubscribing it.
 var parseWorkers = runtime.NumCPU() + 2
 
+// valuesPool recycles the []*string a parsed line's field values land in — a 150K-line file used to
+// mean 150K fresh map[string]string allocations; see internal/store/CLAUDE.md.
+var valuesPool = sync.Pool{
+	New: func() any { return make([]*string, 0, 8) },
+}
+
+func getValues(n int) []*string {
+	v := valuesPool.Get().([]*string)
+	if cap(v) < n {
+		return make([]*string, n)
+	}
+	return v[:n]
+}
+
+func putValues(v []*string) {
+	valuesPool.Put(v[:0])
+}
+
 type parsedLine struct {
 	blank  bool
 	ok     bool
-	values map[string]string
+	values []*string
 	ts     *time.Time
 }
 
@@ -63,7 +82,12 @@ func parseLinesConcurrently(lines []string, fields []parse.Field) []parsedLine {
 					results[i] = parsedLine{blank: true}
 					continue
 				}
-				values, ts, ok := parse.Line(lines[i], fields)
+				values := getValues(len(fields))
+				ts, ok := parse.Line(lines[i], fields, values)
+				if !ok {
+					putValues(values)
+					values = nil
+				}
 				results[i] = parsedLine{ok: ok, values: values, ts: ts}
 			}
 			return nil
@@ -146,17 +170,18 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 			// comment): bookkeeping columns first, then fields in Wiretap.Fields order.
 			row = row[:0]
 			row = append(row, fileHash(w.ID, objectName, lineNo), lines[i], objectName, lineNo, now)
-			for _, f := range w.Fields {
+			for fi, f := range w.Fields {
 				if f.Column == parse.TimeColumn {
 					row = append(row, timeArg(p.ts))
 					continue
 				}
-				if v, present := p.values[f.Column]; present {
-					row = append(row, v)
+				if v := p.values[fi]; v != nil {
+					row = append(row, *v)
 				} else {
 					row = append(row, nil)
 				}
 			}
+			putValues(p.values)
 
 			if err := appender.AppendRow(row...); err != nil {
 				return err

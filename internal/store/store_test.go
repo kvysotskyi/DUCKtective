@@ -140,6 +140,37 @@ func TestSearchFiltersAndTimeFallback(t *testing.T) {
 	}
 }
 
+func TestLoadFileMissingFieldIsNullNotEmptyString(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-missing-field", DefaultFields())
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	// sampleLines' last valid line, {"level":"INFO"}, has no "msg" or "time" key at all — its msg
+	// column must come back as an absent map key (SQL NULL), not present-but-"" (which parse.Line's
+	// pooled []*string values must distinguish via nil, same as the map it replaced).
+	found := false
+	for _, row := range res.Rows {
+		if row.Time == nil {
+			found = true
+			if _, hasMsg := row.Fields["msg"]; hasMsg {
+				t.Errorf("Fields[\"msg\"] present for the row with no msg key, want it absent entirely: %+v", row.Fields)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no row with a nil time found — expected the {\"level\":\"INFO\"} line to survive with time unset")
+	}
+}
+
 func TestDeleteOlderThan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
