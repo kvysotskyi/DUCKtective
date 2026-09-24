@@ -25,11 +25,12 @@ const (
 )
 
 // DeleteOlderThan removes rows whose time — or, for rows with no parsable time, ingested_at — is before cutoff, reporting how many.
-func (db *DB) DeleteOlderThan(ctx context.Context, w Wiretap, cutoff time.Time) (int64, error) {
+func (db *DB) DeleteOlderThan(ctx context.Context, w Wiretap, cutoff time.Time) (deleted int64, retErr error) {
 	h, err := db.handle(w)
 	if err != nil {
 		return 0, err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockWrite()
 	defer h.unlockWrite()
 	return deleteOlderThanLocked(ctx, h, w, cutoff)
@@ -74,7 +75,7 @@ func oldestCutoff(ctx context.Context, h *wiretapHandle, w Wiretap, remaining in
 }
 
 // ApplyRetention runs the wiretap's whole policy in one locked pass: age expiry, then the size cap, then a compaction when enough was deleted to pay for it.
-func (db *DB) ApplyRetention(ctx context.Context, w Wiretap, now time.Time) (RetentionResult, error) {
+func (db *DB) ApplyRetention(ctx context.Context, w Wiretap, now time.Time) (res RetentionResult, retErr error) {
 	if w.RetentionDays <= 0 && w.MaxSizeMB <= 0 {
 		return RetentionResult{}, fmt.Errorf("wiretap has no retention configured")
 	}
@@ -82,10 +83,10 @@ func (db *DB) ApplyRetention(ctx context.Context, w Wiretap, now time.Time) (Ret
 	if err != nil {
 		return RetentionResult{}, err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockWrite()
 	defer h.unlockWrite()
 
-	var res RetentionResult
 	if w.RetentionDays > 0 {
 		n, err := deleteOlderThanLocked(ctx, h, w, now.AddDate(0, 0, -w.RetentionDays))
 		if err != nil {

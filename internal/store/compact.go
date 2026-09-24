@@ -2,41 +2,62 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"time"
 )
 
+// copyBatchRows bounds one INSERT … SELECT during a copy; each batch is checkpointed before the next so dirty blocks never accumulate past the memory cap.
+const copyBatchRows = 20_000
+
 // CompactWiretap copies the wiretap's live rows into a fresh file and swaps it in, so its footprint becomes exactly the live data — in-place rewrites left dead blocks behind (see CLAUDE.md); returns bytes reclaimed.
-func (db *DB) CompactWiretap(ctx context.Context, w Wiretap) (int64, error) {
+func (db *DB) CompactWiretap(ctx context.Context, w Wiretap) (reclaimed int64, retErr error) {
 	h, err := db.handle(w)
 	if err != nil {
 		return 0, err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockWrite()
 	defer h.unlockWrite()
 	return compactLocked(ctx, db, h, w)
 }
 
-// copyWiretapTo copies w's table and dedup rows from the executing connection's main schema into a brand-new DuckDB file at destPath via ATTACH; CREATE TABLE AS SELECT keeps the load-bearing column order.
-func copyWiretapTo(exec func(string, ...any) error, w Wiretap, destPath string) error {
+// copyWiretapTo copies w's table and dedup rows from src's main schema into a brand-new DuckDB file at destPath via ATTACH, in rowid batches; the schema is cloned with CREATE TABLE AS SELECT … LIMIT 0 so the load-bearing column order survives.
+func copyWiretapTo(ctx context.Context, src *sql.DB, w Wiretap, destPath string) error {
 	for _, p := range []string{destPath, destPath + ".wal"} {
 		os.Remove(p)
 	}
 	os.RemoveAll(destPath + ".tmp")
 
+	exec := func(q string, args ...any) error {
+		_, err := src.ExecContext(ctx, q, args...)
+		return err
+	}
 	if err := exec(`ATTACH '` + sqlQuote(destPath) + `' AS dest`); err != nil {
 		return err
 	}
 	defer exec(`DETACH dest`)
 
-	stmts := []string{
-		ingestedFilesDDL("dest."),
-		`CREATE TABLE dest."` + w.TableName + `" AS SELECT * FROM main."` + w.TableName + `"`,
+	table := `"` + w.TableName + `"`
+	if err := exec(ingestedFilesDDL("dest.")); err != nil {
+		return err
 	}
-	for _, s := range stmts {
-		if err := exec(s); err != nil {
-			return err
+	if err := exec(`CREATE TABLE dest.` + table + ` AS SELECT * FROM main.` + table + ` LIMIT 0`); err != nil {
+		return err
+	}
+
+	var maxRow int64
+	if err := src.QueryRowContext(ctx, `SELECT COALESCE(MAX(rowid), -1) FROM main.`+table).Scan(&maxRow); err != nil {
+		return err
+	}
+	for lo := int64(0); lo <= maxRow; lo += copyBatchRows {
+		if err := exec(`INSERT INTO dest.`+table+` SELECT * FROM main.`+table+` WHERE rowid >= ? AND rowid < ?`, lo, lo+copyBatchRows); err != nil {
+			return fmt.Errorf("copy rows %d..%d: %w", lo, lo+copyBatchRows, err)
+		}
+		if err := exec(`CHECKPOINT dest`); err != nil {
+			return fmt.Errorf("checkpoint after rows %d..%d: %w", lo, lo+copyBatchRows, err)
 		}
 	}
 	return exec(`INSERT INTO dest._meta_ingested_files
@@ -50,11 +71,7 @@ func compactLocked(ctx context.Context, db *DB, h *wiretapHandle, w Wiretap) (in
 	path := db.wiretapPath(w.ID)
 	fresh := path + ".compact"
 
-	exec := func(q string, args ...any) error {
-		_, err := h.sql.ExecContext(ctx, q, args...)
-		return err
-	}
-	if err := copyWiretapTo(exec, w, fresh); err != nil {
+	if err := copyWiretapTo(ctx, h.sql, w, fresh); err != nil {
 		return 0, err
 	}
 

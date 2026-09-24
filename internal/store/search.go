@@ -50,7 +50,8 @@ func otherColumns(w Wiretap) []string {
 }
 
 // Search runs one parameterized query built from whichever filters are set — no SQL ever reaches the caller.
-func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, error) {
+func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResult, retErr error) {
+	defer func() { db.heal(w.ID, retErr) }()
 	var where []string
 	var args []any
 
@@ -157,11 +158,12 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (SearchResult, e
 }
 
 // DistinctLevels feeds the level filter's dropdown from values already loaded for this wiretap.
-func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
+func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) (levels []string, retErr error) {
 	h, err := db.handle(w)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockRead()
 	defer h.unlockRead()
 	rows, err := h.sql.QueryContext(ctx,
@@ -183,11 +185,12 @@ func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) ([]string, error) {
 }
 
 // RawLine backs the "inspect full line" view.
-func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (string, error) {
+func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (line string, retErr error) {
 	h, err := db.handle(w)
 	if err != nil {
 		return "", err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockRead()
 	defer h.unlockRead()
 	var raw string

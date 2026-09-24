@@ -67,12 +67,8 @@ func (db *DB) exportLegacyWiretap(ctx context.Context, w Wiretap) error {
 	if err := db.catalog.QueryRowContext(ctx, `SELECT COUNT(*) FROM main."`+w.TableName+`"`).Scan(&rows); err != nil {
 		return err
 	}
-	exec := func(q string, args ...any) error {
-		_, err := db.catalog.ExecContext(ctx, q, args...)
-		return err
-	}
 	path := db.wiretapPath(w.ID)
-	if err := copyWiretapTo(exec, w, path); err != nil {
+	if err := copyWiretapTo(ctx, db.catalog, w, path); err != nil {
 		return err
 	}
 	log.Printf("[migrate] %s: %d row(s) -> %s in %s", w.Name, rows, path, time.Since(start))

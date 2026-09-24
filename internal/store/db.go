@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,8 +18,8 @@ import (
 	"ducktective/internal/appdir"
 )
 
-// wiretapMemoryLimit caps each wiretap's own DuckDB instance; block caching is left to the OS page cache instead (see CLAUDE.md).
-const wiretapMemoryLimit = "100MB"
+// wiretapMemoryLimit caps each wiretap's own DuckDB instance (block caching is left to the OS page cache, see CLAUDE.md); a var so tests can shrink it to prove every transaction still checkpoints under a tiny cap.
+var wiretapMemoryLimit = "100MB"
 
 // catalogMemoryLimit is higher only because a one-time legacy migration copies tables through the catalog instance.
 const catalogMemoryLimit = "512MB"
@@ -114,8 +116,9 @@ func (db *DB) openCatalog() error {
 	return nil
 }
 
+// openDuckDB opens one instance; preserve_insertion_order=false lets bulk copies run parallel and lean, and is safe because every query orders explicitly.
 func openDuckDB(path, memoryLimit string) (*sql.DB, error) {
-	d, err := sql.Open("duckdb", path+"?memory_limit="+memoryLimit)
+	d, err := sql.Open("duckdb", path+"?memory_limit="+memoryLimit+"&preserve_insertion_order=false")
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +230,15 @@ func (db *DB) openHandle(w Wiretap, create bool) (*wiretapHandle, error) {
 	h.touch()
 	db.handles[w.ID] = h
 	return h, nil
+}
+
+// heal drops a handle whose instance hit DuckDB's fatal "database has been invalidated" state so the next call reopens it; returns err unchanged.
+func (db *DB) heal(id string, err error) error {
+	if err != nil && strings.Contains(err.Error(), "database has been invalidated") {
+		log.Printf("[store] wiretap %s: instance invalidated, reopening on next use: %v", id, err)
+		db.closeHandle(id)
+	}
+	return err
 }
 
 func (db *DB) closeHandle(id string) error {

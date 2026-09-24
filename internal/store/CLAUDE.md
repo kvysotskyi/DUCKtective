@@ -80,9 +80,14 @@ every call site that builds SQL from `f.Column`.
 
 `LoadFile` (ingest.go) streams a file in `ingestChunkLines` (10K) line
 chunks — read a chunk, parse it concurrently (`parseLinesConcurrently`,
-worker pool sized `runtime.NumCPU()+2`), append it, `Flush`, repeat — all
-inside one transaction. Rows go through `github.com/marcboeker/go-duckdb`'s
-native **Appender** API — not a batched multi-row SQL `INSERT`. That was tried
+worker pool sized `runtime.NumCPU()+2`), append it, **commit**, repeat.
+Each chunk is its own transaction on purpose: DuckDB's checkpoint cannot
+spill, it must hold the dirty rows it writes in memory, and a whole
+~200K-line file committed at once (~150MB dirty) failed its checkpoint
+under the 100MB cap with `could not allocate block of size 256.0 KiB` —
+which is a *fatal* error that invalidates the instance. Rows go through
+`github.com/marcboeker/go-duckdb`'s native **Appender** API — not a
+batched multi-row SQL `INSERT`. That was tried
 first and measured, against a real ~90K-line file, at a flat ~600µs/row
 *regardless of batch size* (1 row or 1000 rows per statement made no
 difference) — the bottleneck was the SQL insert path itself (parse/plan/
@@ -107,16 +112,24 @@ lines within a file and across files, instead of allocating fresh ones
 each time. See `TestLoadFileMissingFieldIsNullNotEmptyString` for the
 nil-vs-empty-string regression this must not reintroduce.
 
-**`LoadFile` does not dedupe.** There is no per-row uniqueness
-constraint on `file_hash` (there used to be a `PRIMARY KEY` +
-`ON CONFLICT DO NOTHING`, which was *also* measured and found to make no
-difference — DuckDB's conflict-check path is the slow one regardless).
-Calling `LoadFile` twice for the same file inserts every row twice.
-Callers must check `IsFileLoaded` first and skip files already loaded
-(see `App.LoadFilesNow` / `App.autoLoadNewFiles` in
-[internal/app](../app/CLAUDE.md)) — safe because each file loads inside
-one all-or-nothing transaction, so "already fully loaded" is the only
-duplicate scenario that can occur.
+**Dedup is file-level, and `LoadFile` is idempotent.** There is no
+per-row uniqueness constraint on `file_hash` (there used to be a
+`PRIMARY KEY` + `ON CONFLICT DO NOTHING`, which was *also* measured and
+found to make no difference — DuckDB's conflict-check path is the slow one
+regardless). Because chunks commit individually, a crash mid-file can
+leave that file's earlier rows behind *without* its `_meta_ingested_files`
+marker (written last) — so `LoadFile` starts by deleting every row with
+that `source_file`, making a re-load replace rather than duplicate
+(`TestLoadFileReloadAfterPartialAttemptIsIdempotent`). Callers still check
+`IsFileLoaded` first (see `App.LoadFilesNow` / `App.autoLoadNewFiles` in
+[internal/app](../app/CLAUDE.md)) — that's the cheap skip that avoids
+downloading a finished file at all, not the correctness guarantee.
+
+**A fatal DuckDB error self-heals.** Any operation whose error contains
+`database has been invalidated` (DuckDB's state after a failed checkpoint
+or similar fatal) goes through `db.heal`, which drops the wiretap's handle
+so the next call reopens the file cleanly instead of every call failing
+until the app restarts.
 
 ## Memory: the big consumer is DuckDB's heap, not Go's
 
@@ -137,6 +150,17 @@ macOS to swap them out. Three things bound this, in order of impact:
    copies tables through it isn't starved — the catalog itself holds one
    tiny table and never approaches it). DuckDB spills to `<file>.tmp` when
    an operator needs more.
+
+   **The cap's hard floor is the largest single transaction**, because a
+   checkpoint can't spill: it holds every dirty row it's writing. That is
+   why `LoadFile` commits per 10K-line chunk, `copyWiretapTo` copies in
+   `copyBatchRows` (20K) rowid batches with a `CHECKPOINT dest` after each
+   (a 100K batch without it OOM'd on the *second* batch at a 20MB cap —
+   batch-one's dirty blocks were still pinned), and every wiretap instance opens
+   with `preserve_insertion_order=false` (bulk copies run parallel and
+   lean; safe because every query orders explicitly).
+   `TestLoadAndCompactStayCheckpointSafeUnderTinyMemoryLimit` loads 200K
+   rows and compacts under a deliberate 20MB cap to keep it that way.
 
    **What 100MB costs.** `memory_limit` bounds DuckDB's *own* block cache
    and operator memory; it does not bound how much data the OS keeps in its
@@ -185,8 +209,12 @@ scattered across blocks (rows land wherever `LoadFile`'s Appender happened to
 write them, not clustered by `time`), so in practice almost no block is ever
 100% dead, and neither an automatic checkpoint (runs on `db.Close`) nor an
 explicit `VACUUM` reclaims the space. `CompactWiretap` sidesteps this by
-copying the live rows into a **brand-new file** (`ATTACH` + `CREATE TABLE
-… AS SELECT *`, the same `copyWiretapTo` the legacy migration uses), then
+copying the live rows into a **brand-new file** (`ATTACH`, clone the
+schema with `CREATE TABLE … AS SELECT * … LIMIT 0`, then `INSERT … SELECT`
+in `copyBatchRows` rowid batches, checkpointing `dest` after each, so no
+transaction outgrows the memory cap — the same `copyWiretapTo` the legacy
+migration uses; DuckDB fills the tail row group before opening a new one,
+so small batches don't fragment the result), then
 swapping it in under the wiretap's write lock: close the instance, move
 the fresh file over the old one, reopen. A new file is exactly the live
 data by construction. **Don't go back to an in-place rewrite** (`CREATE

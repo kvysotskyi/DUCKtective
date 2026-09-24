@@ -507,6 +507,85 @@ func TestLegacyLayoutMigrates(t *testing.T) {
 	}
 }
 
+// randomLines builds n NDJSON lines with incompressible payloads and strictly increasing timestamps.
+func randomLines(n int, payloadBytes int) string {
+	rng := rand.New(rand.NewSource(1))
+	var sb strings.Builder
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	buf := make([]byte, payloadBytes)
+	for i := 0; i < n; i++ {
+		rng.Read(buf)
+		fmt.Fprintf(&sb, `{"time":"%s","level":"INFO","msg":"%x"}`+"\n",
+			base.Add(time.Duration(i)*time.Second).Format(time.RFC3339), buf)
+	}
+	return sb.String()
+}
+
+// A whole-file transaction of ~200K rows used to be checkpointed in one go and blew past the memory
+// cap with "could not allocate block ... Failed to create checkpoint", which invalidates the whole
+// instance. Chunked commits and rowid-batched copies must keep every transaction under even a tiny cap.
+func TestLoadAndCompactStayCheckpointSafeUnderTinyMemoryLimit(t *testing.T) {
+	prev := wiretapMemoryLimit
+	wiretapMemoryLimit = "20MB"
+	t.Cleanup(func() { wiretapMemoryLimit = prev })
+
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-tiny-cap", DefaultFields())
+
+	const n = 200_000
+	result, err := db.LoadFile(ctx, w, "big.jsonl", strings.NewReader(randomLines(n, 100)))
+	if err != nil {
+		t.Fatalf("LoadFile under 20MB cap: %v", err)
+	}
+	if result.RowsInserted != n {
+		t.Fatalf("RowsInserted = %d, want %d", result.RowsInserted, n)
+	}
+	if _, err := db.CompactWiretap(ctx, w); err != nil {
+		t.Fatalf("CompactWiretap under 20MB cap: %v", err)
+	}
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search after compact: %v", err)
+	}
+	if len(res.Rows) != PageSize {
+		t.Errorf("Search returned %d rows, want a full page of %d", len(res.Rows), PageSize)
+	}
+}
+
+// LoadFile commits per chunk, so a crash can leave a file's rows behind without its dedup marker.
+// Re-loading such a file must replace those rows, not duplicate them.
+func TestLoadFileReloadAfterPartialAttemptIsIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-reload", DefaultFields())
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	h, err := db.handle(w)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if _, err := h.sql.ExecContext(ctx, `DELETE FROM _meta_ingested_files`); err != nil {
+		t.Fatalf("simulate missing marker: %v", err)
+	}
+	if loaded, _ := db.IsFileLoaded(ctx, w, "f.jsonl"); loaded {
+		t.Fatal("marker should be gone")
+	}
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("re-LoadFile: %v", err)
+	}
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Errorf("rows after reload = %d, want 4 (the earlier attempt's rows replaced, not duplicated)", len(res.Rows))
+	}
+}
+
 func TestApplyRetentionSizeCapTrimsAndCompacts(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

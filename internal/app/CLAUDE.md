@@ -44,7 +44,9 @@ DuckDB Appender insert, itself internally concurrent for parsing — see
 [internal/store/CLAUDE.md](../store/CLAUDE.md)) can start on an earlier file
 while later downloads are still in flight. `LoadFilesNow` additionally
 filters out already-loaded files via `IsFileLoaded` *before* downloading
-them at all — dedup is file-level, not something `LoadFile` does itself.
+them at all — the cheap skip. `LoadFile` itself also deletes any rows an
+earlier attempt left for that file before loading, so a re-load is
+idempotent (see [internal/store/CLAUDE.md](../store/CLAUDE.md)).
 
 ### ⚠️ downloadAll streams; it must never buffer whole files again
 

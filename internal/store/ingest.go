@@ -97,12 +97,12 @@ func parseLinesConcurrently(lines []string, fields []parse.Field) []parsedLine {
 	return results
 }
 
-// ingestChunkLines bounds how many lines LoadFile holds in memory at once (Go side) and how many rows the
-// Appender buffers natively before a Flush — a var so tests can shrink it to exercise chunk boundaries.
+// ingestChunkLines bounds how many lines LoadFile holds in memory at once and how many rows one
+// transaction (and therefore one checkpoint) covers — a var so tests can shrink it.
 var ingestChunkLines = 10_000
 
-// LoadFile streams objectName through read→parse→append in ingestChunkLines-sized chunks inside one all-or-nothing transaction; it does NOT dedupe — callers check IsFileLoaded first (see internal/store/CLAUDE.md).
-func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.Reader) (IngestResult, error) {
+// LoadFile streams objectName through read→parse→append, committing every ingestChunkLines lines so no transaction outgrows the memory cap; it first deletes any rows an earlier attempt left for this file, so re-loading is idempotent (see internal/store/CLAUDE.md).
+func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.Reader) (result IngestResult, retErr error) {
 	loadStart := time.Now()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -111,6 +111,7 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 	if err != nil {
 		return IngestResult{}, err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockWrite()
 	defer h.unlockWrite()
 
@@ -120,52 +121,27 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN TRANSACTION"); err != nil {
+	if _, err := conn.ExecContext(ctx, `DELETE FROM "`+w.TableName+`" WHERE source_file = ?`, objectName); err != nil {
 		return IngestResult{}, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			// Best-effort: the connection may already be broken, in which case the rollback is moot.
-			conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
 
-	var result IngestResult
 	now := time.Now().UTC()
 	var readDur, parseDur, insertDur time.Duration
 	totalLines := 0
+	row := make([]driver.Value, 0, len(w.Fields)+5)
+	lines := make([]string, 0, ingestChunkLines)
 
-	err = conn.Raw(func(driverConn any) error {
-		appender, err := duckdb.NewAppenderFromConn(driverConn.(driver.Conn), "", w.TableName)
-		if err != nil {
+	appendChunk := func(lines []string, parsed []parsedLine, firstLineNo int) error {
+		if _, err := conn.ExecContext(ctx, "BEGIN TRANSACTION"); err != nil {
 			return err
 		}
-		defer appender.Close()
-
-		row := make([]driver.Value, 0, len(w.Fields)+5)
-		lines := make([]string, 0, ingestChunkLines)
-		for {
-			readStart := time.Now()
-			lines = lines[:0]
-			for len(lines) < ingestChunkLines && scanner.Scan() {
-				lines = append(lines, scanner.Text())
-			}
-			if err := scanner.Err(); err != nil {
+		err := conn.Raw(func(driverConn any) error {
+			appender, err := duckdb.NewAppenderFromConn(driverConn.(driver.Conn), "", w.TableName)
+			if err != nil {
 				return err
 			}
-			readDur += time.Since(readStart)
-			if len(lines) == 0 {
-				return nil
-			}
-
-			parseStart := time.Now()
-			parsed := parseLinesConcurrently(lines, w.Fields)
-			parseDur += time.Since(parseStart)
-
-			insertStart := time.Now()
 			for i, p := range parsed {
-				lineNo := totalLines + i + 1
+				lineNo := firstLineNo + i
 				if p.blank {
 					continue
 				}
@@ -174,7 +150,7 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 					continue
 				}
 
-				// Column order here must match the physical table layout (see CreateWiretap's DDL
+				// Column order here must match the physical table layout (see createWiretapTable's DDL
 				// comment): bookkeeping columns first, then fields in Wiretap.Fields order.
 				row = row[:0]
 				row = append(row, fileHash(w.ID, objectName, lineNo), lines[i], objectName, lineNo, now)
@@ -192,19 +168,45 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 				putValues(p.values)
 
 				if err := appender.AppendRow(row...); err != nil {
+					appender.Close()
 					return err
 				}
 				result.RowsInserted++
 			}
-			totalLines += len(lines)
-			if err := appender.Flush(); err != nil {
-				return err
-			}
-			insertDur += time.Since(insertStart)
+			return appender.Close()
+		})
+		if err != nil {
+			conn.ExecContext(context.Background(), "ROLLBACK")
+			return err
 		}
-	})
-	if err != nil {
-		return result, err
+		_, err = conn.ExecContext(ctx, "COMMIT")
+		return err
+	}
+
+	for {
+		readStart := time.Now()
+		lines = lines[:0]
+		for len(lines) < ingestChunkLines && scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return result, err
+		}
+		readDur += time.Since(readStart)
+		if len(lines) == 0 {
+			break
+		}
+
+		parseStart := time.Now()
+		parsed := parseLinesConcurrently(lines, w.Fields)
+		parseDur += time.Since(parseStart)
+
+		insertStart := time.Now()
+		if err := appendChunk(lines, parsed, totalLines+1); err != nil {
+			return result, err
+		}
+		totalLines += len(lines)
+		insertDur += time.Since(insertStart)
 	}
 
 	if _, err := conn.ExecContext(ctx, `
@@ -217,22 +219,19 @@ func (db *DB) LoadFile(ctx context.Context, w Wiretap, objectName string, r io.R
 		return result, err
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return result, err
-	}
-	committed = true
-
 	log.Printf("[ingest] %s: lines=%d rows=%d skipped=%d read=%s parse=%s(workers=%d) insert=%s total=%s",
 		objectName, totalLines, result.RowsInserted, result.LinesSkipped,
 		readDur, parseDur, parseWorkers, insertDur, time.Since(loadStart))
 	return result, nil
 }
 
-func (db *DB) IsFileLoaded(ctx context.Context, w Wiretap, objectName string) (bool, error) {
+// IsFileLoaded reports whether a completed LoadFile has marked objectName done — callers skip such files before downloading them.
+func (db *DB) IsFileLoaded(ctx context.Context, w Wiretap, objectName string) (loaded bool, retErr error) {
 	h, err := db.handle(w)
 	if err != nil {
 		return false, err
 	}
+	defer func() { db.heal(w.ID, retErr) }()
 	h.lockRead()
 	defer h.unlockRead()
 	var n int
