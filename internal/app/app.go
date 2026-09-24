@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -241,6 +242,11 @@ func downloadAll(ctx context.Context, src source.Source, names []string) <-chan 
 	return results
 }
 
+// freeOSMemory forces Go to hand freed heap pages back to the OS immediately instead of via its own lazy scavenger — see internal/app/CLAUDE.md.
+func freeOSMemory() {
+	debug.FreeOSMemory()
+}
+
 func (a *App) emitSyncProgress(wiretapID string, done, total int, current string) {
 	wailsruntime.EventsEmit(a.ctx, "wiretap:sync-progress", map[string]any{
 		"wiretapId": wiretapID,
@@ -296,6 +302,9 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 			continue
 		}
 		summaries[res.name] = LoadSummary{Name: res.name, RowsInserted: result.RowsInserted, LinesSkipped: result.LinesSkipped}
+	}
+	if len(toDownload) > 0 {
+		freeOSMemory()
 	}
 	log.Printf("[LoadFilesNow] %d file(s) (%d already loaded) in %s", len(names), len(names)-len(toDownload), time.Since(batchStart))
 
@@ -360,6 +369,7 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 			loaded++
 		}
 	}
+	freeOSMemory()
 	log.Printf("[autoLoadNewFiles] %s: %d file(s) in %s", w.Name, len(toLoad), time.Since(batchStart))
 	return loaded, nil
 }

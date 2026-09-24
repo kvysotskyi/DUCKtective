@@ -72,6 +72,22 @@ heap. **Callers of `downloadAll` must `Close` each result's `body`** —
 `LoadFilesNow`/`autoLoadNewFiles` do this right after their `LoadFile`
 call, whether it errors or not. Do not reintroduce `io.ReadAll` here.
 
+### `freeOSMemory` — why RSS stays high even with no real leak
+
+Diagnosed with `DUCKTECTIVE_PPROF=1` (see below): after the fix above,
+diffing two heap snapshots taken a minute apart mid-sync showed the live
+heap stable at ~150-220MB — a healthy GC, not a leak — while `ps`/Activity
+Monitor reported 1-1.9GB RSS, and a forced GC didn't move that number.
+This is a known Go-on-Darwin behavior: the runtime returns freed pages to
+the OS lazily (`MADV_FREE`), so a burst of large transient allocations
+(parsing a 150K-line file) pushes the process's reported RSS to a
+high-water mark that doesn't come back down on its own, even though the
+memory is logically free and reclaimable under real pressure.
+`LoadFilesNow`/`autoLoadNewFiles` call `freeOSMemory` (`debug.FreeOSMemory`)
+once their batch finishes, forcing Go to hand those pages back
+immediately instead of waiting on its own scavenger — this doesn't change
+peak usage, just how long the OS-visible number stays inflated afterward.
+
 Both paths log `[download]`/`[LoadFilesNow]`/`[autoLoadNewFiles]` timing
 lines via the standard `log` package — check these first if load
 performance regresses.
