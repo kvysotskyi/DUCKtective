@@ -514,8 +514,12 @@ function collapseExpandedRow() {
     }
 }
 
+function rowKey(row) {
+    return `${row.sourceFile}#${row.sourceLine}`;
+}
+
 async function toggleExpandRow(tr, row) {
-    if (expandedRow && expandedRow.dataset.forRow === row.fileHash) {
+    if (expandedRow && expandedRow.dataset.forRow === rowKey(row)) {
         collapseExpandedRow();
         return;
     }
@@ -523,7 +527,7 @@ async function toggleExpandRow(tr, row) {
 
     const detailTr = document.createElement('tr');
     detailTr.className = 'detail-row';
-    detailTr.dataset.forRow = row.fileHash;
+    detailTr.dataset.forRow = rowKey(row);
     const td = document.createElement('td');
     td.colSpan = 4;
     td.textContent = 'Loading…';
@@ -532,7 +536,7 @@ async function toggleExpandRow(tr, row) {
     expandedRow = detailTr;
 
     try {
-        const raw = await GetRawLine(currentWiretapId, row.fileHash);
+        const raw = await GetRawLine(currentWiretapId, row.sourceFile, row.sourceLine);
         td.replaceChildren(buildDetailView(raw));
     } catch (err) {
         td.textContent = `Failed to load raw line: ${err}`;
@@ -618,7 +622,8 @@ function renderWiretapsTable() {
         tr.appendChild(cell(w.name));
         tr.appendChild(cell(sourceLabel(w)));
         tr.appendChild(cell(w.prefix));
-        tr.appendChild(cell(w.retentionDays > 0 ? `${w.retentionDays}d` : 'disabled'));
+        tr.appendChild(cell(retentionLabel(w)));
+        tr.appendChild(cell(formatBytes(w.sizeBytes || 0)));
         tr.appendChild(cell(w.autoLoadEnabled ? `every ${w.pollIntervalMinutes}m` : 'off'));
         tr.appendChild(cell(w.lastPolledAt ? formatIsoLocal(w.lastPolledAt) : 'never'));
 
@@ -637,6 +642,13 @@ function renderWiretapsTable() {
 
         tbody.appendChild(tr);
     }
+}
+
+function retentionLabel(w) {
+    const parts = [];
+    if (w.retentionDays > 0) parts.push(`${w.retentionDays}d`);
+    if (w.maxSizeMB > 0) parts.push(`≤ ${w.maxSizeMB} MB`);
+    return parts.length ? parts.join(' · ') : 'disabled';
 }
 
 function actionButton(label, handler) {
@@ -663,8 +675,10 @@ async function onRunRetentionNow(id) {
     pendingDeleteId = null;
     setWiretapsStatus('Running retention…');
     try {
-        const deleted = await RunRetentionNow(id);
-        setWiretapsStatus(`Deleted ${deleted} row(s).`);
+        const r = await RunRetentionNow(id);
+        const reclaimed = r.compacted ? `, reclaimed ${formatBytes(r.bytesReclaimed)}` : '';
+        setWiretapsStatus(`Deleted ${r.rowsDeleted} row(s)${reclaimed}. Now ${formatBytes(r.sizeBytes)} on disk.`);
+        await refreshWiretaps();
     } catch (err) {
         setWiretapsStatus(`Retention failed: ${err}`);
     }
@@ -676,6 +690,7 @@ async function onCompactWiretapNow(id) {
     try {
         const reclaimed = await CompactWiretapNow(id);
         setWiretapsStatus(reclaimed > 0 ? `Reclaimed ${formatBytes(reclaimed)}.` : 'Nothing to reclaim.');
+        await refreshWiretaps();
     } catch (err) {
         setWiretapsStatus(`Compact failed: ${err}`);
     }
@@ -720,6 +735,7 @@ async function openWiretapForm(wiretapId) {
         el('wf-prefix').value = w.prefix;
         el('wf-retention').value = w.retentionDays;
         el('wf-load-days-back').value = w.loadDaysBack;
+        el('wf-max-size').value = w.maxSizeMB;
         el('wf-autoload').checked = w.autoLoadEnabled;
         el('wf-poll-interval').value = w.pollIntervalMinutes;
         formFields = w.fields.map((f) => ({ column: f.column, jsonKeysText: f.jsonKeys.join(', '), required: f.required }));
@@ -738,6 +754,7 @@ async function openWiretapForm(wiretapId) {
         el('wf-prefix').value = '';
         el('wf-retention').value = 0;
         el('wf-load-days-back').value = 0;
+        el('wf-max-size').value = 0;
         el('wf-autoload').checked = false;
         el('wf-poll-interval').value = 15;
         projectPicker.clear();
@@ -857,6 +874,7 @@ async function onSaveWiretap() {
         fields: fieldsFromForm(),
         retentionDays: parseInt(el('wf-retention').value, 10) || 0,
         loadDaysBack: parseInt(el('wf-load-days-back').value, 10) || 0,
+        maxSizeMB: parseInt(el('wf-max-size').value, 10) || 0,
         autoLoadEnabled: el('wf-autoload').checked,
         pollIntervalMinutes: parseInt(el('wf-poll-interval').value, 10) || 15,
     };

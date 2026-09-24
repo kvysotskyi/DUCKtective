@@ -37,14 +37,24 @@ how to add a new source type here.
 
 ## Load pipeline concurrency
 
-`LoadFilesNow` and `autoLoadNewFiles` share `downloadAll`: bounded
-concurrent GCS downloads (`maxConcurrentDownloads = runtime.NumCPU()+2`,
-via `errgroup`), streamed back over a channel so `db.LoadFile` (parse +
-DuckDB Appender insert, itself internally concurrent for parsing — see
-[internal/store/CLAUDE.md](../store/CLAUDE.md)) can start on an earlier file
-while later downloads are still in flight. `LoadFilesNow` additionally
-filters out already-loaded files via `IsFileLoaded` *before* downloading
-them at all — dedup is file-level, not something `LoadFile` does itself.
+`LoadFilesNow` and `autoLoadNewFiles` share `loadPipeline`, which
+overlaps the network with the database without the memory blow-up the
+first design had. `downloadAll` opens up to `maxConcurrentDownloads`
+objects and hands each over as a live reader; `loadPipeline` immediately
+calls `db.PrepareFile` on it — which starts streaming and parsing that
+file into bounded chunks in the background — and keeps up to
+`maxInFlightFiles` (4) such files pending. Commits (`db.CommitFile`, the
+serialized Appender work) happen strictly in order as the queue fills, so
+while file A is being written, files B–E are already downloading and
+parsing. Memory is `maxInFlightFiles × (pendingChunkDepth+1)` parsed
+chunks (~50–100MB worst case), independent of file count or size, because
+a pending file's reader blocks once its channel is full. Measured
+baseline before this: ~2–3 s per 160K-line file, ~60% of it waiting on
+GCS with the DB idle, files strictly sequential. `LoadFilesNow` still
+skips already-loaded files via `IsFileLoaded` *before* downloading them —
+the cheap skip; `CommitFile` itself deletes any rows an earlier attempt
+left for the file, so a re-load is idempotent (see
+[internal/store/CLAUDE.md](../store/CLAUDE.md)).
 
 ### ⚠️ downloadAll streams; it must never buffer whole files again
 
@@ -121,8 +131,31 @@ for the pattern).
 ## scheduler.go
 
 One `time.Ticker` (`pollTick = 1 minute`) per open app instance, started
-in `Startup`. Each tick, every `AutoLoadEnabled` Wiretap whose
-`PollIntervalMinutes` has elapsed since `LastPolledAt` gets
-`autoLoadNewFiles` + retention cleanup (if `RetentionDays > 0`) +
-`MarkPolled`. There is no background service when the app is closed —
+in `Startup`. Each tick, after a wiretap's due work below, runs
+`reencodeIfLegacy` on it: a file still in the pre-ZSTD storage format
+(written by DuckDB ≤ 1.1, `db.NeedsReencode`) is rewritten once via
+`CompactWiretap` (~2 min for 10GB, searches keep working; a failure is
+retried after `reencodeRetryAfter`), logged as `[reencode]` — it runs
+*after* retention so a pass that already compacted isn't copied twice
+(`TestReencodeIfLegacyRewritesOnce`) — see
+[internal/store/CLAUDE.md](../store/CLAUDE.md#storage-format-v14-files-zstd-text--measured-9-smaller).
+Every Wiretap that has *either* `AutoLoadEnabled`
+*or* a retention policy (`RetentionDays > 0` or `MaxSizeMB > 0`) and whose
+`PollIntervalMinutes` has elapsed since `LastPolledAt` gets, in order:
+`autoLoadNewFiles` (if auto-load is on), `db.ApplyRetention` (if it has a
+policy — age expiry, size cap, and compaction in one pass; see
+[internal/store/CLAUDE.md](../store/CLAUDE.md#retention-policy-applyretention)),
+then `MarkPolled`. Retention deliberately no longer depends on auto-load
+being enabled — a wiretap you fill manually still expires. After the loop
+the tick calls `db.CloseIdle(idleHandleTTL)` so wiretaps not touched for
+10 minutes release their DuckDB instance (and its memory cap's worth of
+buffer pool). There is no background service when the app is closed —
 this goroutine simply stops on `Shutdown`.
+
+The tick is one goroutine and processes wiretaps sequentially, and every
+store write path (`LoadFile`, `ApplyRetention`, `CompactWiretap`) takes
+the wiretap's own write mutex — so a UI "Load now"/"Compact" click can no
+longer collide with the scheduler on the same table; it just waits.
+`RunRetentionNow` (the UI button) returns the same `store.RetentionResult`
+the scheduler gets, so the status line can show rows deleted, bytes
+reclaimed, and the resulting size.

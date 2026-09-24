@@ -115,11 +115,10 @@ on `window.go` from devtools.
 wails build
 ```
 
-`wails.json` sets `build:tags` to `no_duckdb_arrow` — go-duckdb's optional
-Arrow C-Data-Interface bridge references symbols the bundled static lib
-doesn't export on darwin/arm64, and this app only uses `database/sql`, so
-it's excluded. Don't drop that tag without confirming the link still
-succeeds on every target platform.
+DuckDB is embedded via `github.com/duckdb/duckdb-go/v2`, which ships
+prebuilt static libraries per platform; no build tags are needed (its Arrow
+bridge is opt-in via `-tags duckdb_arrow`, and this app only uses
+`database/sql`).
 
 ### Testing
 

@@ -3,7 +3,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -106,7 +105,7 @@ func TestIntegrationRealBucket(t *testing.T) {
 		return
 	}
 
-	raw, err := db.RawLine(ctx, w, res.Rows[0].FileHash)
+	raw, err := db.RawLine(ctx, w, res.Rows[0].SourceFile, res.Rows[0].SourceLine)
 	if err != nil {
 		t.Fatalf("RawLine: %v", err)
 	}
@@ -195,7 +194,8 @@ func TestIntegrationLoadPerformance(t *testing.T) {
 			failed++
 			continue
 		}
-		result, err := db.LoadFile(ctx, w, res.name, bytes.NewReader(res.data))
+		result, err := db.LoadFile(ctx, w, res.name, res.body)
+		res.body.Close()
 		if err != nil {
 			t.Errorf("LoadFile %s: %v", res.name, err)
 			failed++

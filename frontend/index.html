@@ -90,7 +90,7 @@
         <table id="wiretaps-table" class="log-table">
             <thead>
             <tr>
-                <th>Name</th><th>Source</th><th>Prefix</th><th>Retention</th>
+                <th>Name</th><th>Source</th><th>Prefix</th><th>Retention</th><th>Size</th>
                 <th>Auto-load</th><th>Last polled</th><th></th>
             </tr>
             </thead>
@@ -137,6 +137,7 @@
 
                 <label>Retention, in days (0 = disabled) <input id="wf-retention" type="number" min="0" value="0"/></label>
                 <label>Only load files from the last N days (0 = load all) <input id="wf-load-days-back" type="number" min="0" value="0"/></label>
+                <label>Max size on disk, in MB (0 = unlimited; oldest rows are trimmed to stay under it) <input id="wf-max-size" type="number" min="0" value="0"/></label>
                 <label class="checkbox-label"><input id="wf-autoload" type="checkbox"/> Auto-load new files</label>
                 <label>Poll interval, in minutes <input id="wf-poll-interval" type="number" min="1" value="15"/></label>
 

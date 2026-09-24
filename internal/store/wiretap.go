@@ -24,7 +24,7 @@ type GCSSourceConfig struct {
 
 // Wiretap bundles a source (where its files live), the fields to extract from its NDJSON lines, and
 // its own retention/auto-load schedule. Its table holds exactly the columns in Fields plus the fixed
-// bookkeeping columns (file_hash, raw, source_file, source_line, ingested_at).
+// bookkeeping columns (raw, source_file, source_line, ingested_at).
 type Wiretap struct {
 	ID                  string           `json:"id"`
 	Name                string           `json:"name"`
@@ -37,9 +37,13 @@ type Wiretap struct {
 	AutoLoadEnabled     bool             `json:"autoLoadEnabled"`
 	PollIntervalMinutes int              `json:"pollIntervalMinutes"`
 	// LoadDaysBack limits loading to files modified in the last N days (0 = no limit).
-	LoadDaysBack int        `json:"loadDaysBack"`
+	LoadDaysBack int `json:"loadDaysBack"`
+	// MaxSizeMB caps the wiretap's file on disk; retention trims the oldest rows to stay under it (0 = unlimited).
+	MaxSizeMB    int        `json:"maxSizeMB"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	LastPolledAt *time.Time `json:"lastPolledAt"`
+	// SizeBytes is the wiretap file's current size — read from disk on every List/Get, never stored.
+	SizeBytes int64 `json:"sizeBytes"`
 }
 
 // WiretapInput is what the UI submits to create or update a wiretap.
@@ -53,6 +57,7 @@ type WiretapInput struct {
 	AutoLoadEnabled     bool             `json:"autoLoadEnabled"`
 	PollIntervalMinutes int              `json:"pollIntervalMinutes"`
 	LoadDaysBack        int              `json:"loadDaysBack"`
+	MaxSizeMB           int              `json:"maxSizeMB"`
 }
 
 // DefaultFields pre-fills a new wiretap with the fields the original fixed schema always extracted.
@@ -68,7 +73,7 @@ func DefaultFields() []parse.Field {
 }
 
 var reservedColumns = map[string]bool{
-	"file_hash": true, "raw": true, "source_file": true, "source_line": true, "ingested_at": true,
+	"raw": true, "source_file": true, "source_line": true, "ingested_at": true,
 }
 
 // validColumn matches a safe SQL identifier — enforced because, unlike the old fixed schema, column
@@ -125,10 +130,10 @@ func columnType(column string) string {
 	if column == parse.TimeColumn {
 		return "TIMESTAMP"
 	}
-	return "TEXT"
+	return textColumnType
 }
 
-// CreateWiretap validates the input, creates the wiretap's dynamic table, and records it.
+// CreateWiretap validates the input, records the wiretap in the catalog, and creates its table in its own file.
 func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, error) {
 	if in.Name == "" {
 		return Wiretap{}, fmt.Errorf("name is required")
@@ -142,7 +147,7 @@ func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, erro
 
 	id := sanitizeIdent(in.Name)
 	var exists int
-	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM _meta_wiretaps WHERE id = ?`, id).Scan(&exists); err != nil {
+	if err := db.catalog.QueryRowContext(ctx, `SELECT COUNT(*) FROM _meta_wiretaps WHERE id = ?`, id).Scan(&exists); err != nil {
 		return Wiretap{}, err
 	}
 	if exists > 0 {
@@ -161,36 +166,11 @@ func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, erro
 		AutoLoadEnabled:     in.AutoLoadEnabled,
 		PollIntervalMinutes: in.PollIntervalMinutes,
 		LoadDaysBack:        in.LoadDaysBack,
+		MaxSizeMB:           in.MaxSizeMB,
 		CreatedAt:           time.Now().UTC(),
 	}
 	if w.PollIntervalMinutes <= 0 {
 		w.PollIntervalMinutes = 15
-	}
-
-	var ddl strings.Builder
-	ddl.WriteString(`CREATE TABLE "`)
-	ddl.WriteString(w.TableName)
-	// file_hash has no uniqueness constraint (and LoadFile no ON CONFLICT) deliberately — DuckDB's
-	// per-row conflict-check path is drastically slower than a plain vectorized bulk insert. Duplicate
-	// prevention lives at the file level instead: callers must check IsFileLoaded before calling
-	// LoadFile, since each file loads inside one all-or-nothing transaction and can't leave partial
-	// duplicate rows behind on its own.
-	//
-	// Bookkeeping columns come before the field columns, not after: LoadFile appends rows via DuckDB's
-	// Appender, which binds positionally by physical column order, not by name. ALTER TABLE ADD COLUMN
-	// (see UpdateWiretap) always appends new columns at the very end of the table, and UpdateWiretap
-	// appends new fields at the end of Wiretap.Fields to match — so field columns must be the last
-	// section of the table for those two "append at the end" behaviors to stay in sync.
-	ddl.WriteString(`" (file_hash TEXT, raw TEXT, source_file TEXT, source_line INTEGER, ingested_at TIMESTAMP`)
-	for _, f := range w.Fields {
-		ddl.WriteString(`, "`)
-		ddl.WriteString(f.Column)
-		ddl.WriteString(`" `)
-		ddl.WriteString(columnType(f.Column))
-	}
-	ddl.WriteString(`)`)
-	if _, err := db.sql.ExecContext(ctx, ddl.String()); err != nil {
-		return Wiretap{}, err
 	}
 
 	fieldsJSON, err := json.Marshal(w.Fields)
@@ -201,26 +181,55 @@ func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, erro
 	if err != nil {
 		return Wiretap{}, err
 	}
-	_, err = db.sql.ExecContext(ctx, `
+	_, err = db.catalog.ExecContext(ctx, `
 		INSERT INTO _meta_wiretaps (
 			id, name, source_type, gcs_config_json, prefix, table_name, fields_json,
-			retention_days, auto_load_enabled, poll_interval_minutes, load_days_back, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			retention_days, auto_load_enabled, poll_interval_minutes, load_days_back, max_size_mb, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.Name, w.SourceType, string(gcsJSON), w.Prefix, w.TableName, string(fieldsJSON),
-		w.RetentionDays, w.AutoLoadEnabled, w.PollIntervalMinutes, w.LoadDaysBack, w.CreatedAt,
+		w.RetentionDays, w.AutoLoadEnabled, w.PollIntervalMinutes, w.LoadDaysBack, w.MaxSizeMB, w.CreatedAt,
 	)
 	if err != nil {
 		return Wiretap{}, err
 	}
+
+	if err := db.createWiretapTable(ctx, w); err != nil {
+		db.removeWiretapFiles(w.ID)
+		db.catalog.ExecContext(ctx, `DELETE FROM _meta_wiretaps WHERE id = ?`, w.ID)
+		return Wiretap{}, err
+	}
+	w.SizeBytes = db.wiretapSize(w.ID)
 	return w, nil
 }
 
-func scanWiretap(row interface{ Scan(...any) error }) (Wiretap, error) {
+// createWiretapTable creates the table with bookkeeping columns first and fields last — the Appender binds positionally and ALTER ADD COLUMN appends, so the two must agree (see CLAUDE.md) — and no per-row constraint, since dedup is file-level and DuckDB's conflict check is far slower than a plain bulk insert.
+func (db *DB) createWiretapTable(ctx context.Context, w Wiretap) error {
+	h, err := db.createHandle(w)
+	if err != nil {
+		return err
+	}
+	var ddl strings.Builder
+	ddl.WriteString(`CREATE TABLE "`)
+	ddl.WriteString(w.TableName)
+	ddl.WriteString(`" (raw ` + textColumnType + `, source_file ` + textColumnType + `, source_line INTEGER, ingested_at TIMESTAMP`)
+	for _, f := range w.Fields {
+		ddl.WriteString(`, "`)
+		ddl.WriteString(f.Column)
+		ddl.WriteString(`" `)
+		ddl.WriteString(columnType(f.Column))
+	}
+	ddl.WriteString(`)`)
+	_, err = h.sql.ExecContext(ctx, ddl.String())
+	return err
+}
+
+func (db *DB) scanWiretap(row interface{ Scan(...any) error }) (Wiretap, error) {
 	var w Wiretap
 	var fieldsJSON, gcsJSON string
 	if err := row.Scan(
 		&w.ID, &w.Name, &w.SourceType, &gcsJSON, &w.Prefix, &w.TableName, &fieldsJSON,
-		&w.RetentionDays, &w.AutoLoadEnabled, &w.PollIntervalMinutes, &w.LoadDaysBack, &w.CreatedAt, &w.LastPolledAt,
+		&w.RetentionDays, &w.AutoLoadEnabled, &w.PollIntervalMinutes, &w.LoadDaysBack, &w.MaxSizeMB,
+		&w.CreatedAt, &w.LastPolledAt,
 	); err != nil {
 		return Wiretap{}, err
 	}
@@ -232,14 +241,15 @@ func scanWiretap(row interface{ Scan(...any) error }) (Wiretap, error) {
 			return Wiretap{}, err
 		}
 	}
+	w.SizeBytes = db.wiretapSize(w.ID)
 	return w, nil
 }
 
 const wiretapColumns = `id, name, source_type, gcs_config_json, prefix, table_name, fields_json,
-	retention_days, auto_load_enabled, poll_interval_minutes, load_days_back, created_at, last_polled_at`
+	retention_days, auto_load_enabled, poll_interval_minutes, load_days_back, max_size_mb, created_at, last_polled_at`
 
 func (db *DB) ListWiretaps(ctx context.Context) ([]Wiretap, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT `+wiretapColumns+` FROM _meta_wiretaps ORDER BY name`)
+	rows, err := db.catalog.QueryContext(ctx, `SELECT `+wiretapColumns+` FROM _meta_wiretaps ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +257,7 @@ func (db *DB) ListWiretaps(ctx context.Context) ([]Wiretap, error) {
 
 	var out []Wiretap
 	for rows.Next() {
-		w, err := scanWiretap(rows)
+		w, err := db.scanWiretap(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -257,8 +267,8 @@ func (db *DB) ListWiretaps(ctx context.Context) ([]Wiretap, error) {
 }
 
 func (db *DB) GetWiretap(ctx context.Context, id string) (Wiretap, error) {
-	row := db.sql.QueryRowContext(ctx, `SELECT `+wiretapColumns+` FROM _meta_wiretaps WHERE id = ?`, id)
-	return scanWiretap(row)
+	row := db.catalog.QueryRowContext(ctx, `SELECT `+wiretapColumns+` FROM _meta_wiretaps WHERE id = ?`, id)
+	return db.scanWiretap(row)
 }
 
 // UpdateWiretap updates source config/prefix/retention/auto-load/poll-interval/name, updates JSON
@@ -290,12 +300,18 @@ func (db *DB) UpdateWiretap(ctx context.Context, id string, in WiretapInput) (Wi
 		byColumn[f.Column] = i
 	}
 
+	h, err := db.handle(existing)
+	if err != nil {
+		return Wiretap{}, err
+	}
+	h.lockWrite()
+	defer h.unlockWrite()
 	for _, nf := range in.Fields {
 		if i, ok := byColumn[nf.Column]; ok {
 			merged[i].JSONKeys = nf.JSONKeys
 			continue
 		}
-		if _, err := db.sql.ExecContext(ctx,
+		if _, err := h.sql.ExecContext(ctx,
 			`ALTER TABLE "`+existing.TableName+`" ADD COLUMN "`+nf.Column+`" `+columnType(nf.Column),
 		); err != nil {
 			return Wiretap{}, err
@@ -323,13 +339,13 @@ func (db *DB) UpdateWiretap(ctx context.Context, id string, in WiretapInput) (Wi
 		pollInterval = existing.PollIntervalMinutes
 	}
 
-	_, err = db.sql.ExecContext(ctx, `
+	_, err = db.catalog.ExecContext(ctx, `
 		UPDATE _meta_wiretaps SET
 			name = ?, source_type = ?, gcs_config_json = ?, prefix = ?, fields_json = ?,
-			retention_days = ?, auto_load_enabled = ?, poll_interval_minutes = ?, load_days_back = ?
+			retention_days = ?, auto_load_enabled = ?, poll_interval_minutes = ?, load_days_back = ?, max_size_mb = ?
 		WHERE id = ?`,
 		name, sourceType, string(gcsJSON), in.Prefix, string(fieldsJSON),
-		in.RetentionDays, in.AutoLoadEnabled, pollInterval, in.LoadDaysBack, id,
+		in.RetentionDays, in.AutoLoadEnabled, pollInterval, in.LoadDaysBack, in.MaxSizeMB, id,
 	)
 	if err != nil {
 		return Wiretap{}, err
@@ -337,22 +353,18 @@ func (db *DB) UpdateWiretap(ctx context.Context, id string, in WiretapInput) (Wi
 	return db.GetWiretap(ctx, id)
 }
 
+// DeleteWiretap removes the catalog row first, then the wiretap's file (table and dedup rows go with it) — an orphaned file is harmless, a row without a file is not.
 func (db *DB) DeleteWiretap(ctx context.Context, id string) error {
-	w, err := db.GetWiretap(ctx, id)
-	if err != nil {
+	if _, err := db.GetWiretap(ctx, id); err != nil {
 		return err
 	}
-	if _, err := db.sql.ExecContext(ctx, `DROP TABLE IF EXISTS "`+w.TableName+`"`); err != nil {
+	if _, err := db.catalog.ExecContext(ctx, `DELETE FROM _meta_wiretaps WHERE id = ?`, id); err != nil {
 		return err
 	}
-	if _, err := db.sql.ExecContext(ctx, `DELETE FROM _meta_ingested_files WHERE wiretap_id = ?`, id); err != nil {
-		return err
-	}
-	_, err = db.sql.ExecContext(ctx, `DELETE FROM _meta_wiretaps WHERE id = ?`, id)
-	return err
+	return db.removeWiretapFiles(id)
 }
 
 func (db *DB) MarkPolled(ctx context.Context, id string, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE _meta_wiretaps SET last_polled_at = ? WHERE id = ?`, at, id)
+	_, err := db.catalog.ExecContext(ctx, `UPDATE _meta_wiretaps SET last_polled_at = ? WHERE id = ?`, at, id)
 	return err
 }
