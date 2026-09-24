@@ -309,8 +309,17 @@ func (db *DB) CloseIdle(maxIdle time.Duration) int {
 	return closed
 }
 
-// removeWiretapFiles closes the wiretap's instance and deletes its file, WAL, and spill directory.
+// removeWiretapFiles waits for any writer (a compaction mid-swap would otherwise recreate the file), then closes the wiretap's instance and deletes its file, WAL, and spill directory.
 func (db *DB) removeWiretapFiles(id string) error {
+	db.mu.Lock()
+	h, ok := db.handles[id]
+	db.mu.Unlock()
+	if ok {
+		h.writeMu.Lock()
+		defer h.writeMu.Unlock()
+		h.mu.Lock()
+		defer h.mu.Unlock()
+	}
 	if err := db.closeHandle(id); err != nil {
 		return err
 	}

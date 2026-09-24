@@ -277,7 +277,14 @@ file in. **Batches are time ranges, never rowid ranges.** `copyRange`
 bisects `[min(time), max(time)]` until a span holds ≤ the cap-derived
 batch size — and bisects again if DuckDB's non-fatal `Out of Memory` says
 a batch was still too big — and rows with no parsable `time` get the same
-treatment keyed on `ingested_at`.
+treatment keyed on `ingested_at`. When a span is already one microsecond
+wide and still over the batch (second-resolution logs can put 100K rows
+on one `time` value), `copySpanByRowid` bisects that span by **rowid
+range** instead — the time predicate still prunes the scan, and unlike
+`ORDER BY rowid LIMIT/OFFSET` (tried first: it materialises the whole
+span to sort it and OOM'd at a 20MB cap) nothing has to be sorted.
+`TestCompactCopesWithManyRowsOnOneTimestamp` pins it with 4× the batch
+on one timestamp.
 Rowid batching was tried first and measured: DuckDB does *not* prune row
 groups on `rowid`, so every 20K-row batch visited the whole table — cost
 grew with table size (114ms on 0.5GB, 489ms on 1.25GB), and on the real

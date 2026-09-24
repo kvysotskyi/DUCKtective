@@ -247,7 +247,7 @@ func (db *DB) CommitFile(ctx context.Context, p *PendingFile) (result IngestResu
 	return result, nil
 }
 
-// appendChunk writes one chunk in its own transaction through the Appender; a chunk is the unit a checkpoint has to hold in memory.
+// appendChunk writes one chunk in its own transaction through the Appender, whose row order must match the physical column order (bookkeeping columns, then Wiretap.Fields — see createWiretapTable); a chunk is the unit a checkpoint has to hold in memory.
 func appendChunk(ctx context.Context, conn *sql.Conn, w Wiretap, objectName string, now time.Time, row []driver.Value, c ingestChunk, result *IngestResult) error {
 	if _, err := conn.ExecContext(ctx, "BEGIN TRANSACTION"); err != nil {
 		return err
@@ -267,8 +267,6 @@ func appendChunk(ctx context.Context, conn *sql.Conn, w Wiretap, objectName stri
 				continue
 			}
 
-			// Column order here must match the physical table layout (see createWiretapTable's DDL
-			// comment): bookkeeping columns first, then fields in Wiretap.Fields order.
 			row = row[:0]
 			row = append(row, c.lines[i], objectName, lineNo, now)
 			for fi, f := range w.Fields {

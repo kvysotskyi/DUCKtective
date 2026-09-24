@@ -105,7 +105,19 @@ func copyRange(ctx context.Context, src *sql.DB, table, col, where string, maxRo
 	return copySpan(ctx, src, table, col, where, lo.Time, hi.Time.Add(time.Microsecond), maxRows)
 }
 
-// copySpan copies one half-open span, splitting it when it holds too many rows or when DuckDB's (non-fatal) Out of Memory says the batch was still too big for the cap.
+// minCopyBatchRows floors the paged fallback — a page this small that still OOMs means the cap itself is unusable.
+const minCopyBatchRows = 1000
+
+func isOOM(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Out of Memory")
+}
+
+func checkpointDest(ctx context.Context, src *sql.DB) error {
+	_, err := src.ExecContext(ctx, `CHECKPOINT dest`)
+	return err
+}
+
+// copySpan copies one half-open span: bisecting while it holds too many rows (or OOMs), and paging by rowid once a span is a single microsecond that still exceeds the batch — logs with second-resolution timestamps can put 100K rows on one value.
 func copySpan(ctx context.Context, src *sql.DB, table, col, where string, lo, hi time.Time, maxRows int64) error {
 	span := ` WHERE ` + where + ` AND ` + col + ` >= ? AND ` + col + ` < ?`
 	var n int64
@@ -123,17 +135,66 @@ func copySpan(ctx context.Context, src *sql.DB, table, col, where string, lo, hi
 		}
 		return copySpan(ctx, src, table, col, where, mid, hi, maxRows)
 	}
-	if n > maxRows && splittable {
-		return bisect()
+	if n > maxRows {
+		if splittable {
+			return bisect()
+		}
+		return copySpanByRowid(ctx, src, table, span, lo, hi, maxRows)
 	}
 	if _, err := src.ExecContext(ctx, `INSERT INTO dest.`+table+` SELECT * FROM main.`+table+span, lo, hi); err != nil {
-		if splittable && strings.Contains(err.Error(), "Out of Memory") {
-			return bisect()
+		if isOOM(err) {
+			if splittable {
+				return bisect()
+			}
+			return copySpanByRowid(ctx, src, table, span, lo, hi, max(maxRows/2, minCopyBatchRows))
 		}
 		return fmt.Errorf("copy %s in [%s, %s) (%d rows): %w", col, lo.Format(time.RFC3339Nano), hi.Format(time.RFC3339Nano), n, err)
 	}
-	if _, err := src.ExecContext(ctx, `CHECKPOINT dest`); err != nil {
+	if err := checkpointDest(ctx, src); err != nil {
 		return fmt.Errorf("checkpoint after %s < %s: %w", col, hi.Format(time.RFC3339Nano), err)
+	}
+	return nil
+}
+
+// copySpanByRowid splits a single-timestamp span by rowid ranges instead (the time predicate still prunes the scan, and unlike ORDER BY … OFFSET nothing has to be materialised to sort), bisecting until a range fits the batch.
+func copySpanByRowid(ctx context.Context, src *sql.DB, table, span string, lo, hi time.Time, maxRows int64) error {
+	var rlo, rhi sql.NullInt64
+	if err := src.QueryRowContext(ctx, `SELECT MIN(rowid), MAX(rowid) + 1 FROM main.`+table+span, lo, hi).Scan(&rlo, &rhi); err != nil {
+		return err
+	}
+	if !rlo.Valid {
+		return nil
+	}
+	return copyRowidRange(ctx, src, table, span, lo, hi, rlo.Int64, rhi.Int64, maxRows)
+}
+
+func copyRowidRange(ctx context.Context, src *sql.DB, table, span string, lo, hi time.Time, rlo, rhi, maxRows int64) error {
+	rng := span + ` AND rowid >= ? AND rowid < ?`
+	var n int64
+	if err := src.QueryRowContext(ctx, `SELECT COUNT(*) FROM main.`+table+rng, lo, hi, rlo, rhi).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	bisect := func() error {
+		mid := rlo + (rhi-rlo)/2
+		if err := copyRowidRange(ctx, src, table, span, lo, hi, rlo, mid, maxRows); err != nil {
+			return err
+		}
+		return copyRowidRange(ctx, src, table, span, lo, hi, mid, rhi, maxRows)
+	}
+	if n > maxRows && rhi-rlo > 1 {
+		return bisect()
+	}
+	if _, err := src.ExecContext(ctx, `INSERT INTO dest.`+table+` SELECT * FROM main.`+table+rng, lo, hi, rlo, rhi); err != nil {
+		if isOOM(err) && rhi-rlo > 1 && n > minCopyBatchRows {
+			return bisect()
+		}
+		return fmt.Errorf("copy rowid [%d, %d) (%d rows) at %s: %w", rlo, rhi, n, lo.Format(time.RFC3339Nano), err)
+	}
+	if err := checkpointDest(ctx, src); err != nil {
+		return fmt.Errorf("checkpoint after rowid %d at %s: %w", rhi, lo.Format(time.RFC3339Nano), err)
 	}
 	return nil
 }
@@ -155,6 +216,7 @@ func compactLocked(ctx context.Context, db *DB, h *wiretapHandle, w Wiretap) (in
 	h.mu.Unlock()
 	h.mu.RLock()
 	if swapErr != nil {
+		log.Printf("[compact] %s: swap failed, finished copy left at %s and the original kept: %v", w.Name, fresh, swapErr)
 		db.closeHandle(w.ID)
 		return 0, swapErr
 	}

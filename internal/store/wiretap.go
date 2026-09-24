@@ -202,6 +202,7 @@ func (db *DB) CreateWiretap(ctx context.Context, in WiretapInput) (Wiretap, erro
 	return w, nil
 }
 
+// createWiretapTable creates the table with bookkeeping columns first and fields last — the Appender binds positionally and ALTER ADD COLUMN appends, so the two must agree (see CLAUDE.md) — and no per-row constraint, since dedup is file-level and DuckDB's conflict check is far slower than a plain bulk insert.
 func (db *DB) createWiretapTable(ctx context.Context, w Wiretap) error {
 	h, err := db.createHandle(w)
 	if err != nil {
@@ -210,14 +211,6 @@ func (db *DB) createWiretapTable(ctx context.Context, w Wiretap) error {
 	var ddl strings.Builder
 	ddl.WriteString(`CREATE TABLE "`)
 	ddl.WriteString(w.TableName)
-	// No per-row key or uniqueness constraint on purpose — DuckDB's conflict-check path is drastically
-	// slower than a plain vectorized bulk insert; dedup is file-level (see internal/store/CLAUDE.md).
-	//
-	// Bookkeeping columns come before the field columns, not after: CommitFile appends rows via DuckDB's
-	// Appender, which binds positionally by physical column order, not by name. ALTER TABLE ADD COLUMN
-	// (see UpdateWiretap) always appends new columns at the very end of the table, and UpdateWiretap
-	// appends new fields at the end of Wiretap.Fields to match — so field columns must be the last
-	// section of the table for those two "append at the end" behaviors to stay in sync.
 	ddl.WriteString(`" (raw ` + textColumnType + `, source_file ` + textColumnType + `, source_line INTEGER, ingested_at TIMESTAMP`)
 	for _, f := range w.Fields {
 		ddl.WriteString(`, "`)

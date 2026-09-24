@@ -60,30 +60,25 @@ func (s *scheduler) tick(ctx context.Context) {
 
 	now := time.Now().UTC()
 	for _, w := range wiretaps {
-		s.reencodeIfLegacy(ctx, w, now)
 		hasRetention := w.RetentionDays > 0 || w.MaxSizeMB > 0
-		if !w.AutoLoadEnabled && !hasRetention {
-			continue
-		}
 		due := w.LastPolledAt == nil ||
 			now.Sub(*w.LastPolledAt) >= time.Duration(w.PollIntervalMinutes)*time.Minute
-		if !due {
-			continue
-		}
-
-		if w.AutoLoadEnabled {
-			if _, err := s.app.autoLoadNewFiles(ctx, w); err != nil {
-				println("scheduler: auto-load for wiretap", w.ID, "failed:", err.Error())
+		if (w.AutoLoadEnabled || hasRetention) && due {
+			if w.AutoLoadEnabled {
+				if _, err := s.app.autoLoadNewFiles(ctx, w); err != nil {
+					println("scheduler: auto-load for wiretap", w.ID, "failed:", err.Error())
+				}
+			}
+			if hasRetention {
+				if _, err := s.app.db.ApplyRetention(ctx, w, now); err != nil {
+					println("scheduler: retention for wiretap", w.ID, "failed:", err.Error())
+				}
+			}
+			if err := s.app.db.MarkPolled(ctx, w.ID, now); err != nil {
+				println("scheduler: mark polled for wiretap", w.ID, "failed:", err.Error())
 			}
 		}
-		if hasRetention {
-			if _, err := s.app.db.ApplyRetention(ctx, w, now); err != nil {
-				println("scheduler: retention for wiretap", w.ID, "failed:", err.Error())
-			}
-		}
-		if err := s.app.db.MarkPolled(ctx, w.ID, now); err != nil {
-			println("scheduler: mark polled for wiretap", w.ID, "failed:", err.Error())
-		}
+		s.reencodeIfLegacy(ctx, w, now)
 	}
 	s.app.db.CloseIdle(idleHandleTTL)
 }
@@ -94,7 +89,7 @@ const idleHandleTTL = 10 * time.Minute
 // reencodeRetryAfter spaces out retries of a failed legacy-format re-encode, which is a multi-minute rewrite on a big wiretap.
 const reencodeRetryAfter = time.Hour
 
-// reencodeIfLegacy rewrites a wiretap file created before ZSTD text storage (DuckDB ≤ 1.1) into the current format once; ~9× smaller on real logs.
+// reencodeIfLegacy rewrites a wiretap file created before ZSTD text storage (DuckDB ≤ 1.1) into the current format once (~9× smaller on real logs); it runs after retention so a pass that already compacted doesn't get copied twice.
 func (s *scheduler) reencodeIfLegacy(ctx context.Context, w store.Wiretap, now time.Time) {
 	if !s.app.db.NeedsReencode(w) || now.Sub(s.reencodeFailed[w.ID]) < reencodeRetryAfter {
 		return

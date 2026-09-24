@@ -121,6 +121,12 @@ func TestSearchFiltersAndTimeFallback(t *testing.T) {
 	if len(res.Rows) != 1 || res.Rows[0].Fields["msg"] != "first" {
 		t.Fatalf("accession filter mismatch: %+v", res.Rows)
 	}
+	if sub, err := db.Search(ctx, w, Filters{Fields: map[string]string{"msg": "eco"}}); err != nil || len(sub.Rows) != 2 {
+		t.Fatalf("field substring filter: rows=%d err=%v, want 2 (second, epoch seconds)", len(sub.Rows), err)
+	}
+	if wild, err := db.Search(ctx, w, Filters{Fields: map[string]string{"msg": "s_cond"}}); err != nil || len(wild.Rows) != 0 {
+		t.Fatalf("field filter treated _ as a wildcard: rows=%d err=%v", len(wild.Rows), err)
+	}
 
 	textRes, err := db.Search(ctx, w, Filters{Text: "gateway"})
 	if err != nil {
@@ -917,5 +923,41 @@ func TestInstanceSettingsApplied(t *testing.T) {
 		if got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestCompactCopesWithManyRowsOnOneTimestamp(t *testing.T) {
+	prev := wiretapMemoryLimitBytes
+	wiretapMemoryLimitBytes = 20 << 20
+	t.Cleanup(func() { wiretapMemoryLimitBytes = prev })
+
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-burst", DefaultFields())
+
+	// 4× the cap-derived batch (copyBatchRows(20MB) = 10240), every row stamped the same second.
+	const n = 40_000
+	var b strings.Builder
+	pad := strings.Repeat("x", 200)
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, `{"time":"2024-05-05T12:00:00Z","level":"INFO","msg":"burst %d %s"}`+"\n", i, pad)
+	}
+	if _, err := db.LoadFile(ctx, w, "burst.jsonl", strings.NewReader(b.String())); err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if _, err := db.CompactWiretap(ctx, w); err != nil {
+		t.Fatalf("CompactWiretap with %d rows on one timestamp: %v", n, err)
+	}
+	h, err := db.handle(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got int
+	if err := h.sql.QueryRow(`SELECT count(*) FROM "` + w.TableName + `"`).Scan(&got); err != nil || got != n {
+		t.Fatalf("rows after compact = %d (err %v), want %d", got, err, n)
+	}
+	var distinct int
+	if err := h.sql.QueryRow(`SELECT count(DISTINCT source_line) FROM "` + w.TableName + `"`).Scan(&distinct); err != nil || distinct != n {
+		t.Fatalf("distinct source_line after compact = %d (err %v), want %d (no page duplicated or skipped)", distinct, err, n)
 	}
 }

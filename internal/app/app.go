@@ -346,7 +346,6 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 	batchStart := time.Now()
 	loaded := 0
 	a.loadPipeline(ctx, w, src, toLoad, func(_ string, _ store.IngestResult, err error) {
-		// Best-effort — a failed file is left unmarked, so the scheduler/manual sync retries it next tick.
 		if err == nil {
 			loaded++
 		}
