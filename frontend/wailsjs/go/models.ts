@@ -277,6 +277,7 @@ export namespace store {
 	    retentionDays: number;
 	    autoLoadEnabled: boolean;
 	    pollIntervalMinutes: number;
+	    loadDaysBack: number;
 	    // Go type: time
 	    createdAt: any;
 	    // Go type: time
@@ -298,6 +299,7 @@ export namespace store {
 	        this.retentionDays = source["retentionDays"];
 	        this.autoLoadEnabled = source["autoLoadEnabled"];
 	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.loadDaysBack = source["loadDaysBack"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	        this.lastPolledAt = this.convertValues(source["lastPolledAt"], null);
 	    }
@@ -329,6 +331,7 @@ export namespace store {
 	    retentionDays: number;
 	    autoLoadEnabled: boolean;
 	    pollIntervalMinutes: number;
+	    loadDaysBack: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new WiretapInput(source);
@@ -344,6 +347,7 @@ export namespace store {
 	        this.retentionDays = source["retentionDays"];
 	        this.autoLoadEnabled = source["autoLoadEnabled"];
 	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.loadDaysBack = source["loadDaysBack"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

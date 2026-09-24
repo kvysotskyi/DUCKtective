@@ -33,6 +33,32 @@ while later downloads are still in flight. `LoadFilesNow` additionally
 filters out already-loaded files via `IsFileLoaded` *before* downloading
 them at all — dedup is file-level, not something `LoadFile` does itself.
 
+### ⚠️ downloadAll streams; it must never buffer whole files again
+
+A prior version called `io.ReadAll` per object inside the download
+goroutine and sent the resulting `[]byte` through a channel sized to
+`len(names)`. Since downloads are network-bound and run up to
+`maxConcurrentDownloads` at a time while `db.LoadFile` consumes them one
+at a time (sequential by design — see `internal/store/CLAUDE.md`),
+downloads could finish arbitrarily far ahead of the consumer, and nothing
+bounded how many *finished-but-unprocessed* files piled up in that
+channel — each holding its full contents in memory. Confirmed as the
+cause of a multi-GB memory spike loading a large backlog (e.g. auto-load
+catching up after a gap, or a large "Load now" selection).
+
+The fix: `downloadAll` now hands each result to the consumer as a live,
+unread `io.ReadCloser` (`src.OpenObject`'s return value, untouched), and
+the channel is bounded to `maxConcurrentDownloads` instead of
+`len(names)`. `db.LoadFile` already reads its input via `bufio.Scanner`,
+so it streams directly off the network reader — no intermediate `[]byte`
+ever holds a whole file. Once the channel is full, a download goroutine
+blocks on its send (still occupying its `errgroup` concurrency slot), so
+at most `maxConcurrentDownloads` objects are ever open at once, and any
+bytes downloaded-but-not-yet-read sit in the OS socket buffer, not the Go
+heap. **Callers of `downloadAll` must `Close` each result's `body`** —
+`LoadFilesNow`/`autoLoadNewFiles` do this right after their `LoadFile`
+call, whether it errors or not. Do not reintroduce `io.ReadAll` here.
+
 Both paths log `[download]`/`[LoadFilesNow]`/`[autoLoadNewFiles]` timing
 lines via the standard `log` package — check these first if load
 performance regresses.

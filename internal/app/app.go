@@ -2,7 +2,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -212,17 +211,15 @@ var maxConcurrentDownloads = runtime.NumCPU() + 2
 
 type downloadResult struct {
 	name string
-	data []byte
+	body io.ReadCloser
 	err  error
 	dur  time.Duration
 }
 
-// downloadAll fetches every named object with bounded concurrency, streaming results back as each
-// download finishes rather than waiting for the whole batch — so the (sequential, by design — see
-// LoadFile) DB insert for an earlier file can run while later downloads are still in flight.
+// downloadAll opens every named object with bounded concurrency and streams each straight to the consumer as a live io.ReadCloser — callers must Close each result's body (see internal/app/CLAUDE.md).
 func downloadAll(ctx context.Context, src source.Source, names []string) <-chan downloadResult {
 	batchStart := time.Now()
-	results := make(chan downloadResult, len(names))
+	results := make(chan downloadResult, maxConcurrentDownloads)
 	go func() {
 		defer close(results)
 		defer func() {
@@ -234,13 +231,7 @@ func downloadAll(ctx context.Context, src source.Source, names []string) <-chan 
 			g.Go(func() error {
 				start := time.Now()
 				r, err := src.OpenObject(ctx, name)
-				if err != nil {
-					results <- downloadResult{name: name, err: err, dur: time.Since(start)}
-					return nil
-				}
-				data, err := io.ReadAll(r)
-				r.Close()
-				results <- downloadResult{name: name, data: data, err: err, dur: time.Since(start)}
+				results <- downloadResult{name: name, body: r, err: err, dur: time.Since(start)}
 				return nil
 			})
 		}
@@ -292,12 +283,13 @@ func (a *App) LoadFilesNow(wiretapID string, names []string) ([]LoadSummary, err
 	for res := range downloadAll(a.ctx, src, toDownload) {
 		done++
 		a.emitSyncProgress(w.ID, done, len(toDownload), res.name)
-		log.Printf("[download] %s: %s", res.name, res.dur)
+		log.Printf("[download] %s: opened in %s", res.name, res.dur)
 		if res.err != nil {
 			summaries[res.name] = LoadSummary{Name: res.name, Error: res.err.Error()}
 			continue
 		}
-		result, err := a.db.LoadFile(a.ctx, w, res.name, bytes.NewReader(res.data))
+		result, err := a.db.LoadFile(a.ctx, w, res.name, res.body)
+		res.body.Close()
 		if err != nil {
 			summaries[res.name] = LoadSummary{Name: res.name, Error: err.Error()}
 			continue
@@ -357,11 +349,13 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 	for res := range downloadAll(ctx, src, toLoad) {
 		done++
 		a.emitSyncProgress(w.ID, done, len(toLoad), res.name)
-		log.Printf("[download] %s: %s", res.name, res.dur)
+		log.Printf("[download] %s: opened in %s", res.name, res.dur)
 		if res.err != nil {
 			continue // best-effort — the scheduler/manual sync will retry it next tick
 		}
-		if _, err := a.db.LoadFile(ctx, w, res.name, bytes.NewReader(res.data)); err == nil {
+		_, err := a.db.LoadFile(ctx, w, res.name, res.body)
+		res.body.Close()
+		if err == nil {
 			loaded++
 		}
 	}
