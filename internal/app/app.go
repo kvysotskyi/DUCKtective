@@ -88,6 +88,21 @@ func (a *App) sourceFor(w store.Wiretap) (source.Source, error) {
 	}
 }
 
+// filterByAge drops objects older than loadDaysBack days (0 = no limit).
+func filterByAge(objs []source.ObjectInfo, loadDaysBack int) []source.ObjectInfo {
+	if loadDaysBack <= 0 {
+		return objs
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -loadDaysBack)
+	kept := objs[:0]
+	for _, o := range objs {
+		if !o.LastModified.Before(cutoff) {
+			kept = append(kept, o)
+		}
+	}
+	return kept
+}
+
 func (a *App) ListProjects() ([]gcp.Project, error) {
 	return gcp.ListProjects(a.ctx)
 }
@@ -166,6 +181,7 @@ func (a *App) ListObjectsForWiretap(wiretapID, prefixOverride string) ([]FileEnt
 	if err != nil {
 		return nil, err
 	}
+	objs = filterByAge(objs, w.LoadDaysBack)
 
 	entries := make([]FileEntry, len(objs))
 	for i, o := range objs {
@@ -319,6 +335,7 @@ func (a *App) autoLoadNewFiles(ctx context.Context, w store.Wiretap) (int, error
 	if err != nil {
 		return 0, err
 	}
+	objs = filterByAge(objs, w.LoadDaysBack)
 
 	var toLoad []string
 	for _, o := range objs {
