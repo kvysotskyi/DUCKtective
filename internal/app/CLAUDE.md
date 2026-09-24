@@ -14,6 +14,19 @@ validation and querying live in `internal/store`, auth in `internal/gcp`.
 checked at the top of every method instead of panicking if the DB failed
 to open — the UI surfaces that error instead of the app crashing.
 
+## Diagnosing memory/goroutine issues — `DUCKTECTIVE_PPROF=1`
+
+`main.go`'s `maybeStartPprof` starts a `net/http/pprof` server on
+`localhost:6061` when `DUCKTECTIVE_PPROF` is set in the environment —
+unset by default, so a normal launch opens no port. To capture a heap
+profile while reproducing a suspected leak (e.g. `DUCKTECTIVE_PPROF=1
+open /Applications/ducktective.app`, then trigger the load), use
+`go tool pprof http://localhost:6061/debug/pprof/heap` (add
+`-seconds=N` to `debug/pprof/profile` for CPU instead). Take two heap
+snapshots — one at baseline, one after the suspected leak — and diff them
+(`go tool pprof -base baseline.pb.gz after.pb.gz`) to see what's actually
+still growing, rather than guessing from `downloadAll` alone.
+
 ## sourceFor — the pluggable-source factory
 
 `sourceFor(w store.Wiretap) (source.Source, error)` switches on

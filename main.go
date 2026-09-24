@@ -2,6 +2,10 @@ package main
 
 import (
 	"embed"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -13,7 +17,19 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// DUCKTECTIVE_PPROF=1 opts into a localhost-only pprof server for diagnosing memory/goroutine issues — see internal/app/CLAUDE.md.
+func maybeStartPprof() {
+	if os.Getenv("DUCKTECTIVE_PPROF") == "" {
+		return
+	}
+	go func() {
+		log.Println("[pprof] listening on http://localhost:6061/debug/pprof/")
+		log.Println("[pprof]", http.ListenAndServe("localhost:6061", nil))
+	}()
+}
+
 func main() {
+	maybeStartPprof()
 	a := app.New()
 
 	err := wails.Run(&options.App{
