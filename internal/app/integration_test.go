@@ -105,7 +105,7 @@ func TestIntegrationRealBucket(t *testing.T) {
 		return
 	}
 
-	raw, err := db.RawLine(ctx, w, res.Rows[0].FileHash)
+	raw, err := db.RawLine(ctx, w, res.Rows[0].SourceFile, res.Rows[0].SourceLine)
 	if err != nil {
 		t.Fatalf("RawLine: %v", err)
 	}

@@ -226,6 +226,10 @@ func (db *DB) openHandle(w Wiretap, create bool) (*wiretapHandle, error) {
 		d.Close()
 		return nil, err
 	}
+	if err := dropLegacyFileHash(d, w.TableName); err != nil {
+		d.Close()
+		return nil, err
+	}
 	h := &wiretapHandle{sql: d}
 	h.touch()
 	db.handles[w.ID] = h
@@ -238,6 +242,22 @@ func (db *DB) heal(id string, err error) error {
 		log.Printf("[store] wiretap %s: instance invalidated, reopening on next use: %v", id, err)
 		db.closeHandle(id)
 	}
+	return err
+}
+
+// dropLegacyFileHash removes the per-row SHA-256 column older tables carried — 64 incompressible bytes a row that nothing needs once RawLine keys on (source_file, source_line).
+func dropLegacyFileHash(d *sql.DB, table string) error {
+	var n int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM duckdb_columns() WHERE database_name = current_database() AND table_name = ? AND column_name = 'file_hash'`, table,
+	).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	log.Printf("[store] %s: dropping legacy file_hash column", table)
+	_, err := d.Exec(`ALTER TABLE "` + table + `" DROP COLUMN file_hash`)
 	return err
 }
 

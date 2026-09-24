@@ -3,12 +3,15 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"ducktective/internal/parse"
@@ -135,7 +138,7 @@ func TestSearchFiltersAndTimeFallback(t *testing.T) {
 		t.Errorf("DistinctLevels = %v, want 3 distinct non-null levels", levels)
 	}
 
-	raw, err := db.RawLine(ctx, w, res.Rows[0].FileHash)
+	raw, err := db.RawLine(ctx, w, res.Rows[0].SourceFile, res.Rows[0].SourceLine)
 	if err != nil {
 		t.Fatalf("RawLine: %v", err)
 	}
@@ -483,6 +486,17 @@ func TestLegacyLayoutMigrates(t *testing.T) {
 	if legacyLeft, err := db.hasLegacyTables(ctx); err != nil || legacyLeft {
 		t.Errorf("catalog still has wiretap tables after migration (err=%v)", err)
 	}
+	h, err := db.handle(w)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	var fileHashCols int
+	if err := h.sql.QueryRow(`SELECT COUNT(*) FROM duckdb_columns() WHERE table_name = ? AND column_name = 'file_hash'`, w.TableName).Scan(&fileHashCols); err != nil {
+		t.Fatalf("duckdb_columns: %v", err)
+	}
+	if fileHashCols != 0 {
+		t.Error("legacy file_hash column should have been dropped when the wiretap file was first opened")
+	}
 
 	res, err := db.Search(ctx, w, Filters{})
 	if err != nil {
@@ -583,6 +597,66 @@ func TestLoadFileReloadAfterPartialAttemptIsIdempotent(t *testing.T) {
 	}
 	if len(res.Rows) != 4 {
 		t.Errorf("rows after reload = %d, want 4 (the earlier attempt's rows replaced, not duplicated)", len(res.Rows))
+	}
+}
+
+// A read error mid-file must surface from CommitFile, leave the file unmarked so it is retried, and
+// the retry must replace the partial rows rather than add to them.
+func TestCommitFileReadErrorLeavesFileUnmarked(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-readerr", DefaultFields())
+
+	broken := io.MultiReader(strings.NewReader(sampleLines), iotest.ErrReader(errors.New("connection reset")))
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", broken); err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("LoadFile with a failing reader: err = %v, want the read error", err)
+	}
+	if loaded, _ := db.IsFileLoaded(ctx, w, "f.jsonl"); loaded {
+		t.Fatal("a file whose read failed must not be marked loaded")
+	}
+
+	if _, err := db.LoadFile(ctx, w, "f.jsonl", strings.NewReader(sampleLines)); err != nil {
+		t.Fatalf("retry LoadFile: %v", err)
+	}
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Errorf("rows after retry = %d, want 4 (partial rows replaced, not duplicated)", len(res.Rows))
+	}
+}
+
+// Several files can be prepared (streaming and parsing concurrently) before any is committed; commits
+// stay in order and each file's rows and marker land intact.
+func TestPrepareManyThenCommitInOrder(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	w := createTestWiretap(t, db, "w-pipeline", DefaultFields())
+
+	names := []string{"a.jsonl", "b.jsonl", "c.jsonl"}
+	pending := make([]*PendingFile, len(names))
+	for i, n := range names {
+		pending[i] = db.PrepareFile(ctx, w, n, strings.NewReader(sampleLines))
+	}
+	for i, p := range pending {
+		result, err := db.CommitFile(ctx, p)
+		if err != nil {
+			t.Fatalf("CommitFile %s: %v", names[i], err)
+		}
+		if result.RowsInserted != 4 {
+			t.Errorf("%s: RowsInserted = %d, want 4", names[i], result.RowsInserted)
+		}
+		if loaded, _ := db.IsFileLoaded(ctx, w, names[i]); !loaded {
+			t.Errorf("%s not marked loaded", names[i])
+		}
+	}
+	res, err := db.Search(ctx, w, Filters{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Rows) != 12 {
+		t.Errorf("total rows = %d, want 12", len(res.Rows))
 	}
 }
 

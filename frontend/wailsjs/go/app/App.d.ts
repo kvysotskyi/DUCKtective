@@ -18,7 +18,7 @@ export function DeleteWiretap(arg1:string):Promise<void>;
 
 export function DistinctLevels(arg1:string):Promise<Array<string>>;
 
-export function GetRawLine(arg1:string,arg2:string):Promise<string>;
+export function GetRawLine(arg1:string,arg2:string,arg3:number):Promise<string>;
 
 export function ListBuckets(arg1:string):Promise<Array<gcs.BucketInfo>>;
 

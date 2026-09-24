@@ -194,7 +194,6 @@ export namespace store {
 	    }
 	}
 	export class LogRow {
-	    fileHash: string;
 	    // Go type: time
 	    time?: any;
 	    level?: string;
@@ -208,7 +207,6 @@ export namespace store {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.fileHash = source["fileHash"];
 	        this.time = this.convertValues(source["time"], null);
 	        this.level = source["level"];
 	        this.fields = source["fields"];

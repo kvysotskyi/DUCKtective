@@ -25,7 +25,6 @@ type Filters struct {
 }
 
 type LogRow struct {
-	FileHash   string            `json:"fileHash"`
 	Time       *time.Time        `json:"time"`
 	Level      *string           `json:"level"`
 	Fields     map[string]string `json:"fields"`
@@ -86,7 +85,7 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResul
 	}
 
 	others := otherColumns(w)
-	selectCols := []string{"file_hash", `"time"`, `"level"`}
+	selectCols := []string{`"time"`, `"level"`}
 	for _, c := range others {
 		selectCols = append(selectCols, `"`+c+`"`)
 	}
@@ -116,13 +115,12 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResul
 
 	var result SearchResult
 	for rows.Next() {
-		var fileHash string
 		var ts *time.Time
 		var level *string
 		otherVals := make([]*string, len(others))
 
 		dest := make([]any, 0, len(selectCols))
-		dest = append(dest, &fileHash, &ts, &level)
+		dest = append(dest, &ts, &level)
 		for i := range otherVals {
 			dest = append(dest, &otherVals[i])
 		}
@@ -135,7 +133,7 @@ func (db *DB) Search(ctx context.Context, w Wiretap, f Filters) (res SearchResul
 		}
 
 		row := LogRow{
-			FileHash: fileHash, Time: ts, Level: level,
+			Time: ts, Level: level,
 			Fields:     make(map[string]string, len(others)),
 			SourceFile: sourceFile, SourceLine: sourceLine,
 		}
@@ -184,8 +182,8 @@ func (db *DB) DistinctLevels(ctx context.Context, w Wiretap) (levels []string, r
 	return out, rows.Err()
 }
 
-// RawLine backs the "inspect full line" view.
-func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (line string, retErr error) {
+// RawLine backs the "inspect full line" view; a row is identified by where it came from, (source_file, source_line).
+func (db *DB) RawLine(ctx context.Context, w Wiretap, sourceFile string, sourceLine int) (line string, retErr error) {
 	h, err := db.handle(w)
 	if err != nil {
 		return "", err
@@ -194,6 +192,8 @@ func (db *DB) RawLine(ctx context.Context, w Wiretap, fileHash string) (line str
 	h.lockRead()
 	defer h.unlockRead()
 	var raw string
-	err = h.sql.QueryRowContext(ctx, `SELECT raw FROM "`+w.TableName+`" WHERE file_hash = ?`, fileHash).Scan(&raw)
+	err = h.sql.QueryRowContext(ctx,
+		`SELECT raw FROM "`+w.TableName+`" WHERE source_file = ? AND source_line = ?`, sourceFile, sourceLine,
+	).Scan(&raw)
 	return raw, err
 }

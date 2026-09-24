@@ -58,9 +58,12 @@ post-migration `LoadFile` all survive.
 
 ## ⚠️ Table column order is load-bearing
 
-`createWiretapTable`'s DDL puts bookkeeping columns **first** — `file_hash,
-raw, source_file, source_line, ingested_at` — then the Wiretap's `Fields`
-after. This is not cosmetic: `LoadFile` inserts via DuckDB's Appender,
+`createWiretapTable`'s DDL puts bookkeeping columns **first** — `raw,
+source_file, source_line, ingested_at` — then the Wiretap's `Fields`
+after. (Older tables also had a leading `file_hash` column — a 64-char
+SHA-256 per row, 7% of a big wiretap and incompressible; `handle` drops
+it on first open via `dropLegacyFileHash`, and a row is now identified by
+`(source_file, source_line)`, which `RawLine` keys on.) This is not cosmetic: `LoadFile` inserts via DuckDB's Appender,
 which binds row values **positionally** by physical column order, not by
 name. `UpdateWiretap`'s `ALTER TABLE ADD COLUMN` (for a newly added
 field) always appends to the *end* of the physical table, and
@@ -78,9 +81,17 @@ every call site that builds SQL from `f.Column`.
 
 ## LoadFile — why it's an Appender, not INSERT
 
-`LoadFile` (ingest.go) streams a file in `ingestChunkLines` (10K) line
-chunks — read a chunk, parse it concurrently (`parseLinesConcurrently`,
-worker pool sized `runtime.NumCPU()+2`), append it, **commit**, repeat.
+Ingest is a two-stage pipeline (ingest.go). `PrepareFile` starts a
+goroutine that streams the file and parses it into `ingestChunkLines`
+(10K) line chunks (`parseLinesConcurrently`, worker pool sized
+`runtime.NumCPU()+2`), handing them over a channel of depth
+`pendingChunkDepth` (2) — so the reader blocks, and memory stays bounded,
+when the writer falls behind. `CommitFile` takes the wiretap's write lock
+and appends the chunks as they arrive, **committing each one**.
+`LoadFile` is simply both back-to-back. The split exists so the
+app layer can keep several files' network and JSON work in flight while
+the single database writer works through them in order (see
+[internal/app/CLAUDE.md](../app/CLAUDE.md#load-pipeline-concurrency)).
 Each chunk is its own transaction on purpose: DuckDB's checkpoint cannot
 spill, it must hold the dirty rows it writes in memory, and a whole
 ~200K-line file committed at once (~150MB dirty) failed its checkpoint
@@ -112,15 +123,17 @@ lines within a file and across files, instead of allocating fresh ones
 each time. See `TestLoadFileMissingFieldIsNullNotEmptyString` for the
 nil-vs-empty-string regression this must not reintroduce.
 
-**Dedup is file-level, and `LoadFile` is idempotent.** There is no
-per-row uniqueness constraint on `file_hash` (there used to be a
-`PRIMARY KEY` + `ON CONFLICT DO NOTHING`, which was *also* measured and
-found to make no difference — DuckDB's conflict-check path is the slow one
-regardless). Because chunks commit individually, a crash mid-file can
-leave that file's earlier rows behind *without* its `_meta_ingested_files`
-marker (written last) — so `LoadFile` starts by deleting every row with
-that `source_file`, making a re-load replace rather than duplicate
-(`TestLoadFileReloadAfterPartialAttemptIsIdempotent`). Callers still check
+**Dedup is file-level, and `CommitFile` is idempotent.** There is no
+per-row key or uniqueness constraint at all (there used to be a hashed
+`PRIMARY KEY` + `ON CONFLICT DO NOTHING`, measured and found to make no
+difference — DuckDB's conflict-check path is the slow one regardless — and
+the hash column itself was later dropped as pure overhead). Because chunks
+commit individually, a crash or read error mid-file can leave that file's
+earlier rows behind *without* its `_meta_ingested_files` marker (written
+last) — so `CommitFile` starts by deleting every row with that
+`source_file`, making a re-load replace rather than duplicate
+(`TestLoadFileReloadAfterPartialAttemptIsIdempotent`,
+`TestCommitFileReadErrorLeavesFileUnmarked`). Callers still check
 `IsFileLoaded` first (see `App.LoadFilesNow` / `App.autoLoadNewFiles` in
 [internal/app](../app/CLAUDE.md)) — that's the cheap skip that avoids
 downloading a finished file at all, not the correctness guarantee.
@@ -192,8 +205,8 @@ macOS to swap them out. Three things bound this, in order of impact:
    working set is one chunk's worth of `lines`/`parsed`/values regardless
    of file size — which is also what makes `valuesPool` actually recycle
    within a file instead of only across files. See
-   `TestLoadFileChunkBoundariesKeepAbsoluteLineNumbers`: `source_line` and
-   `file_hash` must use the absolute line number, not the chunk offset.
+   `TestLoadFileChunkBoundariesKeepAbsoluteLineNumbers`: `source_line`
+   must be the absolute line number in the file, not the chunk offset.
 
 To re-check attribution later: in `vmmap -summary`, `VM_ALLOCATE` ≈ Go's
 heap, `MALLOC_*` ≈ DuckDB. If `MALLOC_SMALL` grows past ~1GB the cap isn't

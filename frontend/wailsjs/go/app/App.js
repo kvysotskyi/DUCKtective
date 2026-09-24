@@ -26,8 +26,8 @@ export function DistinctLevels(arg1) {
   return window['go']['app']['App']['DistinctLevels'](arg1);
 }
 
-export function GetRawLine(arg1, arg2) {
-  return window['go']['app']['App']['GetRawLine'](arg1, arg2);
+export function GetRawLine(arg1, arg2, arg3) {
+  return window['go']['app']['App']['GetRawLine'](arg1, arg2, arg3);
 }
 
 export function ListBuckets(arg1) {

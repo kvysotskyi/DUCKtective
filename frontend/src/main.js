@@ -514,8 +514,12 @@ function collapseExpandedRow() {
     }
 }
 
+function rowKey(row) {
+    return `${row.sourceFile}#${row.sourceLine}`;
+}
+
 async function toggleExpandRow(tr, row) {
-    if (expandedRow && expandedRow.dataset.forRow === row.fileHash) {
+    if (expandedRow && expandedRow.dataset.forRow === rowKey(row)) {
         collapseExpandedRow();
         return;
     }
@@ -523,7 +527,7 @@ async function toggleExpandRow(tr, row) {
 
     const detailTr = document.createElement('tr');
     detailTr.className = 'detail-row';
-    detailTr.dataset.forRow = row.fileHash;
+    detailTr.dataset.forRow = rowKey(row);
     const td = document.createElement('td');
     td.colSpan = 4;
     td.textContent = 'Loading…';
@@ -532,7 +536,7 @@ async function toggleExpandRow(tr, row) {
     expandedRow = detailTr;
 
     try {
-        const raw = await GetRawLine(currentWiretapId, row.fileHash);
+        const raw = await GetRawLine(currentWiretapId, row.sourceFile, row.sourceLine);
         td.replaceChildren(buildDetailView(raw));
     } catch (err) {
         td.textContent = `Failed to load raw line: ${err}`;

@@ -37,16 +37,24 @@ how to add a new source type here.
 
 ## Load pipeline concurrency
 
-`LoadFilesNow` and `autoLoadNewFiles` share `downloadAll`: bounded
-concurrent GCS downloads (`maxConcurrentDownloads = runtime.NumCPU()+2`,
-via `errgroup`), streamed back over a channel so `db.LoadFile` (parse +
-DuckDB Appender insert, itself internally concurrent for parsing — see
-[internal/store/CLAUDE.md](../store/CLAUDE.md)) can start on an earlier file
-while later downloads are still in flight. `LoadFilesNow` additionally
-filters out already-loaded files via `IsFileLoaded` *before* downloading
-them at all — the cheap skip. `LoadFile` itself also deletes any rows an
-earlier attempt left for that file before loading, so a re-load is
-idempotent (see [internal/store/CLAUDE.md](../store/CLAUDE.md)).
+`LoadFilesNow` and `autoLoadNewFiles` share `loadPipeline`, which
+overlaps the network with the database without the memory blow-up the
+first design had. `downloadAll` opens up to `maxConcurrentDownloads`
+objects and hands each over as a live reader; `loadPipeline` immediately
+calls `db.PrepareFile` on it — which starts streaming and parsing that
+file into bounded chunks in the background — and keeps up to
+`maxInFlightFiles` (4) such files pending. Commits (`db.CommitFile`, the
+serialized Appender work) happen strictly in order as the queue fills, so
+while file A is being written, files B–E are already downloading and
+parsing. Memory is `maxInFlightFiles × (pendingChunkDepth+1)` parsed
+chunks (~50–100MB worst case), independent of file count or size, because
+a pending file's reader blocks once its channel is full. Measured
+baseline before this: ~2–3 s per 160K-line file, ~60% of it waiting on
+GCS with the DB idle, files strictly sequential. `LoadFilesNow` still
+skips already-loaded files via `IsFileLoaded` *before* downloading them —
+the cheap skip; `CommitFile` itself deletes any rows an earlier attempt
+left for the file, so a re-load is idempotent (see
+[internal/store/CLAUDE.md](../store/CLAUDE.md)).
 
 ### ⚠️ downloadAll streams; it must never buffer whole files again
 

@@ -24,7 +24,7 @@ type GCSSourceConfig struct {
 
 // Wiretap bundles a source (where its files live), the fields to extract from its NDJSON lines, and
 // its own retention/auto-load schedule. Its table holds exactly the columns in Fields plus the fixed
-// bookkeeping columns (file_hash, raw, source_file, source_line, ingested_at).
+// bookkeeping columns (raw, source_file, source_line, ingested_at).
 type Wiretap struct {
 	ID                  string           `json:"id"`
 	Name                string           `json:"name"`
@@ -73,7 +73,7 @@ func DefaultFields() []parse.Field {
 }
 
 var reservedColumns = map[string]bool{
-	"file_hash": true, "raw": true, "source_file": true, "source_line": true, "ingested_at": true,
+	"raw": true, "source_file": true, "source_line": true, "ingested_at": true,
 }
 
 // validColumn matches a safe SQL identifier — enforced because, unlike the old fixed schema, column
@@ -210,18 +210,15 @@ func (db *DB) createWiretapTable(ctx context.Context, w Wiretap) error {
 	var ddl strings.Builder
 	ddl.WriteString(`CREATE TABLE "`)
 	ddl.WriteString(w.TableName)
-	// file_hash has no uniqueness constraint (and LoadFile no ON CONFLICT) deliberately — DuckDB's
-	// per-row conflict-check path is drastically slower than a plain vectorized bulk insert. Duplicate
-	// prevention lives at the file level instead: callers must check IsFileLoaded before calling
-	// LoadFile, since each file loads inside one all-or-nothing transaction and can't leave partial
-	// duplicate rows behind on its own.
+	// No per-row key or uniqueness constraint on purpose — DuckDB's conflict-check path is drastically
+	// slower than a plain vectorized bulk insert; dedup is file-level (see internal/store/CLAUDE.md).
 	//
-	// Bookkeeping columns come before the field columns, not after: LoadFile appends rows via DuckDB's
+	// Bookkeeping columns come before the field columns, not after: CommitFile appends rows via DuckDB's
 	// Appender, which binds positionally by physical column order, not by name. ALTER TABLE ADD COLUMN
 	// (see UpdateWiretap) always appends new columns at the very end of the table, and UpdateWiretap
 	// appends new fields at the end of Wiretap.Fields to match — so field columns must be the last
 	// section of the table for those two "append at the end" behaviors to stay in sync.
-	ddl.WriteString(`" (file_hash TEXT, raw TEXT, source_file TEXT, source_line INTEGER, ingested_at TIMESTAMP`)
+	ddl.WriteString(`" (raw TEXT, source_file TEXT, source_line INTEGER, ingested_at TIMESTAMP`)
 	for _, f := range w.Fields {
 		ddl.WriteString(`, "`)
 		ddl.WriteString(f.Column)
